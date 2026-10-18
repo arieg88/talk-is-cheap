@@ -1,0 +1,31 @@
+# Companies and history covered by ingestion.
+# To add a company, add its ticker here and run `talk-is-cheap ingest edgar --tickers NEW`.
+# An earlier `history_start` loads more history on the next ingestion run.
+
+history_start: 2024-01-01
+
+# SEC form types to record in the filings index.
+forms:
+  - 10-K
+  - 10-K/A
+  - 10-Q
+  - 10-Q/A
+  - 8-K
+  - 8-K/A
+
+companies:
+  - ticker: AAPL
+  - ticker: MSFT
+  - ticker: NVDA
+  - ticker: AMZN
+  - ticker: GOOGL
+  - ticker: META
+  - ticker: TSLA
+  - ticker: AMD
+  - ticker: INTC
+  - ticker: CRM
+  - ticker: ORCL
+  - ticker: ADBE
+  - ticker: NFLX
+  - ticker: CSCO
+  - ticker: QCOM

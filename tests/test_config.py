@@ -7,7 +7,16 @@ from talk_is_cheap.config import Environment, Settings
 @pytest.fixture(autouse=True)
 def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the developer's real environment and .env file out of these tests."""
-    for name in ("ENVIRONMENT", "LOG_LEVEL", "DATABASE_URL", "DATABASE_ECHO", "DATABASE_POOL_SIZE"):
+    for name in (
+        "ENVIRONMENT",
+        "LOG_LEVEL",
+        "DATABASE_URL",
+        "DATABASE_ECHO",
+        "DATABASE_POOL_SIZE",
+        "UNIVERSE_FILE",
+        "EDGAR_IDENTITY",
+        "EDGAR_DATA_DIR",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -61,3 +70,29 @@ def test_rejects_unknown_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOG_LEVEL", "VERBOSE")
     with pytest.raises(ValidationError):
         make_settings()
+
+
+def test_edgar_settings_default_to_no_identity_and_a_local_cache() -> None:
+    settings = make_settings()
+    assert settings.edgar_identity is None
+    assert str(settings.edgar_data_dir) == ".cache/edgar"
+    assert str(settings.universe_file) == "universe.yaml"
+
+
+def test_edgar_identity_is_trimmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EDGAR_IDENTITY", "  Jane Doe jane@example.com ")
+    assert make_settings().edgar_identity == "Jane Doe jane@example.com"
+
+
+@pytest.mark.parametrize("identity", ["jane@example.com", "Jane Doe", "Jane Doe jane@example"])
+def test_rejects_edgar_identity_without_name_and_email(
+    monkeypatch: pytest.MonkeyPatch, identity: str
+) -> None:
+    monkeypatch.setenv("EDGAR_IDENTITY", identity)
+    with pytest.raises(ValidationError, match="EDGAR_IDENTITY"):
+        make_settings()
+
+
+def test_blank_edgar_identity_counts_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EDGAR_IDENTITY", "   ")
+    assert make_settings().edgar_identity is None

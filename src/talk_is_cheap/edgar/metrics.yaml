@@ -1,0 +1,73 @@
+# Canonical metrics and the XBRL concepts that can report them.
+#
+# Concepts are listed in priority order. Within one filing, for one period, the first concept
+# that has a value wins, so a company that switches tags between filings is still covered.
+#
+# additive: true  → quarterly values may be derived by subtracting year-to-date totals
+#                   (e.g. Q4 = full year − nine months). Never true for per-share values.
+
+revenue:
+  unit: USD
+  additive: true
+  concepts:
+    # Revenues is the total line when a company reports both it and the narrower
+    # contract-revenue tag, so it is preferred.
+    - us-gaap:Revenues
+    - us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax
+    - us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax
+    - us-gaap:SalesRevenueNet
+
+cost_of_revenue:
+  unit: USD
+  additive: true
+  concepts:
+    - us-gaap:CostOfRevenue
+    - us-gaap:CostOfGoodsAndServicesSold
+    - us-gaap:CostOfGoodsSold
+
+gross_profit:
+  unit: USD
+  additive: true
+  concepts:
+    - us-gaap:GrossProfit
+  # When a filing reports no gross profit for a period, it is computed as
+  # revenue − cost_of_revenue from the same filing and period.
+  fallback: [revenue, cost_of_revenue]
+
+operating_income:
+  unit: USD
+  additive: true
+  concepts:
+    - us-gaap:OperatingIncomeLoss
+
+net_income:
+  unit: USD
+  additive: true
+  concepts:
+    - us-gaap:NetIncomeLoss
+
+eps_diluted:
+  unit: USD/shares
+  additive: false
+  concepts:
+    - us-gaap:EarningsPerShareDiluted
+
+research_and_development:
+  unit: USD
+  additive: true
+  concepts:
+    - us-gaap:ResearchAndDevelopmentExpense
+    - us-gaap:ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost
+
+operating_cash_flow:
+  unit: USD
+  additive: true
+  concepts:
+    - us-gaap:NetCashProvidedByUsedInOperatingActivities
+
+capex:
+  unit: USD
+  additive: true
+  concepts:
+    - us-gaap:PaymentsToAcquirePropertyPlantAndEquipment
+    - us-gaap:PaymentsToAcquireProductiveAssets

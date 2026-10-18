@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install db db-down db-reset migrate db-check lint format typecheck test test-unit check
+.PHONY: help install db db-down db-reset migrate db-check ingest lint format typecheck test test-unit check
 
 help: ## List available commands
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -21,6 +21,9 @@ migrate: ## Apply all database migrations
 
 db-check: ## Report database connectivity, pgvector and migration status
 	uv run talk-is-cheap db-check
+
+ingest: ## Load every company in universe.yaml from SEC EDGAR (needs EDGAR_IDENTITY)
+	uv run talk-is-cheap ingest edgar
 
 lint: ## Check lint and formatting
 	uv run ruff check .

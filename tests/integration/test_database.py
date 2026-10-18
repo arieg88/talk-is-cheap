@@ -1,4 +1,8 @@
+from pathlib import Path
+
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -6,12 +10,15 @@ from talk_is_cheap.db import check_database
 
 pytestmark = pytest.mark.integration
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-async def test_database_is_ready_after_migrations(engine: AsyncEngine) -> None:
+
+async def test_database_is_at_the_latest_migration(engine: AsyncEngine) -> None:
+    head = ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini"))).get_current_head()
     status = await check_database(engine)
     assert status.ready
     assert status.server_version.startswith("16")
-    assert status.migration_revision == "0001"
+    assert status.migration_revision == head
 
 
 async def test_vector_similarity_search_works(engine: AsyncEngine) -> None:

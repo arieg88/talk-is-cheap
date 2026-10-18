@@ -6,10 +6,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.14",
+    "edgartools>=5.62.0",
     "pgvector>=0.3",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.6",
-    "sqlalchemy[asyncio]>=2.0.36",
+    "pyyaml>=6.0",
+    "sqlalchemy[asyncio]>=2.1",
 ]
 
 [project.scripts]
@@ -24,7 +26,9 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "respx>=0.21",
     "ruff>=0.8",
+    "types-pyyaml>=6.0",
 ]
 
 [tool.ruff]
@@ -33,6 +37,10 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated migrations keep long SQL expressions on one line.
+"alembic/versions/*.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["talk_is_cheap"]
