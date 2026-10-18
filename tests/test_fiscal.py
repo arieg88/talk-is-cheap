@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from talk_is_cheap.edgar.fiscal import Duration, FiscalCalendar, classify_duration
+from talk_is_cheap.edgar.fiscal import Duration, FiscalCalendar, FiscalQuarter, classify_duration
 
 APPLE = FiscalCalendar.parse("0927")  # 52/53-week year ending late September
 NVIDIA = FiscalCalendar.parse("0126")  # year ends late January, named after that year
@@ -69,3 +69,56 @@ def test_rejects_malformed_fiscal_year_end(bad: str) -> None:
 )
 def test_classify_duration(start: date, end: date, expected: Duration | None) -> None:
     assert classify_duration(start, end) is expected
+
+
+@pytest.mark.parametrize(
+    ("calendar", "filed", "expected"),
+    [
+        # A September year end (Apple): releases in late Jan, Apr/May, Jul/Aug and Oct.
+        (APPLE, date(2026, 1, 29), FiscalQuarter(2026, 1)),
+        (APPLE, date(2026, 4, 30), FiscalQuarter(2026, 2)),
+        (APPLE, date(2026, 7, 30), FiscalQuarter(2026, 3)),
+        (APPLE, date(2025, 10, 30), FiscalQuarter(2025, 4)),
+        # A January year end (Nvidia): the February release reports the year just ended.
+        (NVIDIA, date(2026, 2, 25), FiscalQuarter(2026, 4)),
+        (NVIDIA, date(2026, 5, 20), FiscalQuarter(2027, 1)),
+        (NVIDIA, date(2026, 8, 26), FiscalQuarter(2027, 2)),
+        (NVIDIA, date(2025, 11, 19), FiscalQuarter(2026, 3)),
+        # A June year end (Microsoft): the July release reports fiscal Q4.
+        (MICROSOFT, date(2026, 7, 29), FiscalQuarter(2026, 4)),
+        (MICROSOFT, date(2025, 10, 29), FiscalQuarter(2026, 1)),
+        (MICROSOFT, date(2026, 1, 28), FiscalQuarter(2026, 2)),
+        (MICROSOFT, date(2026, 4, 29), FiscalQuarter(2026, 3)),
+        (CALENDAR_YEAR, date(2026, 2, 4), FiscalQuarter(2025, 4)),
+        (CALENDAR_YEAR, date(2026, 4, 1), FiscalQuarter(2026, 1)),
+    ],
+)
+def test_quarter_ended_before_a_release(
+    calendar: FiscalCalendar, filed: date, expected: FiscalQuarter
+) -> None:
+    assert calendar.quarter_ended_before(filed) == expected
+
+
+def test_nominal_quarter_ends() -> None:
+    assert MICROSOFT.quarter_end(FiscalQuarter(2026, 2)) == date(2025, 12, 31)
+    assert MICROSOFT.quarter_end(FiscalQuarter(2026, 4)) == date(2026, 6, 30)
+    assert NVIDIA.quarter_end(FiscalQuarter(2027, 2)) == date(2026, 7, 26)
+    assert APPLE.quarter_end(FiscalQuarter(2026, 1)) == date(2025, 12, 27)
+    assert FiscalCalendar.parse("0131").quarter_end(FiscalQuarter(2027, 1)) == date(2026, 4, 30)
+    for quarter in (FiscalQuarter(2026, q) for q in (1, 2, 3, 4)):
+        assert APPLE.quarter_of(APPLE.quarter_end(quarter)) == quarter
+
+
+def test_fiscal_quarter_labels() -> None:
+    quarter = FiscalQuarter.parse("FY2026Q3")
+    assert quarter == FiscalQuarter(2026, 3) == FiscalQuarter.parse("fy2026 q3")
+    assert FiscalQuarter.parse("2026Q3") == quarter
+    assert quarter.label == "FY2026Q3"
+    assert FiscalQuarter(2026, 1).previous == FiscalQuarter(2025, 4)
+    assert FiscalQuarter(2025, 4) < FiscalQuarter(2026, 1)
+
+
+@pytest.mark.parametrize("bad", ["FY2026", "FY26Q3", "FY2026Q5", "FY2026Q12", "Q3", "latest"])
+def test_rejects_malformed_fiscal_quarters(bad: str) -> None:
+    with pytest.raises(ValueError, match="FY2026Q3"):
+        FiscalQuarter.parse(bad)

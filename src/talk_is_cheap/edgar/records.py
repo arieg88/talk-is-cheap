@@ -49,3 +49,15 @@ class RawFact:
     @property
     def qualified_concept(self) -> str:
         return f"{self.taxonomy}:{self.concept}"
+
+
+@dataclass(frozen=True, slots=True)
+class FilingDocument:
+    """One HTML document of a filing, with its content."""
+
+    accession_no: str
+    document_name: str  # file name within the filing, e.g. "q2fy27pr.htm"
+    document_type: str  # SEC document type: the form ("10-Q") or the exhibit ("EX-99.1")
+    description: str | None
+    url: str
+    html: str

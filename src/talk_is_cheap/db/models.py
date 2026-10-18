@@ -1,4 +1,4 @@
-"""ORM models for companies, filings and financial data."""
+"""ORM models for companies, filings, financial data and filing text."""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -15,6 +15,7 @@ from sqlalchemy import (
     Numeric,
     SmallInteger,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -139,3 +140,62 @@ class FinancialValue(Base):
     filed: Mapped[date] = mapped_column(Date)
     derived: Mapped[bool] = mapped_column(Boolean, default=False)
     derivation: Mapped[str | None] = mapped_column(String(128))
+
+
+class Document(Base):
+    """One parsed filing document: an earnings release or exhibit, a 10-Q or 10-K, or a
+    deliveries report or unrelated exhibit filed under item 2.02.
+
+    `text` is the document converted to structured plain text; sections are character
+    ranges of it. A document is re-parsed when `parser_version` changes.
+    """
+
+    __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("accession_no", "document_name", name="uq_documents_document"),
+        CheckConstraint(
+            "doc_type IN ('press_release', 'earnings_exhibit', '10q', '10k', "
+            "'deliveries_report', 'other_exhibit')",
+            name="doc_type",
+        ),
+        CheckConstraint("fiscal_quarter BETWEEN 1 AND 4", name="fiscal_quarter"),
+        Index("ix_documents_company_period", "cik", "fiscal_year", "fiscal_quarter", "doc_type"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    accession_no: Mapped[str] = mapped_column(
+        ForeignKey("filings.accession_no", ondelete="CASCADE")
+    )
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik", ondelete="CASCADE"))
+    doc_type: Mapped[str] = mapped_column(String(32))
+    document_name: Mapped[str] = mapped_column(String(255))
+    exhibit: Mapped[str | None] = mapped_column(String(32))  # e.g. "EX-99.1"
+    url: Mapped[str] = mapped_column(String(512))
+    fiscal_year: Mapped[int] = mapped_column(SmallInteger)
+    fiscal_quarter: Mapped[int] = mapped_column(SmallInteger)
+    period_end: Mapped[date] = mapped_column(Date)
+    filed_at: Mapped[date] = mapped_column(Date)
+    text: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    parser_version: Mapped[str] = mapped_column(String(16))
+    parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Section(Base):
+    """A tagged part of a document: `documents.text[char_start:char_end]`."""
+
+    __tablename__ = "sections"
+    __table_args__ = (
+        UniqueConstraint("document_id", "position", name="uq_sections_position"),
+        CheckConstraint("char_start >= 0 AND char_end >= char_start", name="char_range"),
+        Index("ix_sections_section_type", "section_type"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
+    section_type: Mapped[str] = mapped_column(String(32))
+    title: Mapped[str] = mapped_column(Text)
+    position: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    char_start: Mapped[int] = mapped_column(Integer)
+    char_end: Mapped[int] = mapped_column(Integer)

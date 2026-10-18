@@ -15,6 +15,7 @@ from enum import StrEnum
 
 DRIFT = timedelta(days=10)
 _DAYS_PER_QUARTER = 365.25 / 4
+_QUARTERS = frozenset({"1", "2", "3", "4"})
 
 
 class Duration(StrEnum):
@@ -45,6 +46,31 @@ def classify_duration(start: date, end: date) -> Duration | None:
         if low <= days <= high:
             return duration
     return None
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class FiscalQuarter:
+    fiscal_year: int
+    fiscal_quarter: int
+
+    @property
+    def label(self) -> str:
+        return f"FY{self.fiscal_year}Q{self.fiscal_quarter}"
+
+    @property
+    def previous(self) -> "FiscalQuarter":
+        if self.fiscal_quarter == 1:
+            return FiscalQuarter(self.fiscal_year - 1, 4)
+        return FiscalQuarter(self.fiscal_year, self.fiscal_quarter - 1)
+
+    @classmethod
+    def parse(cls, label: str) -> "FiscalQuarter":
+        """Parse "FY2026Q3" (also "FY2026 Q3" and "2026Q3", any case)."""
+        compact = label.replace(" ", "").upper().removeprefix("FY")
+        year, separator, quarter = compact.partition("Q")
+        if not (separator and year.isdigit() and len(year) == 4 and quarter in _QUARTERS):
+            raise ValueError(f"fiscal quarter must look like FY2026Q3, got {label!r}")
+        return cls(int(year), int(quarter))
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +106,33 @@ class FiscalCalendar:
         """1-4, from how far `period_end` falls before its fiscal year end."""
         days_before = (self.year_end_for(period_end) - period_end).days
         return min(4, max(1, 4 - round(days_before / _DAYS_PER_QUARTER)))
+
+    def quarter_of(self, period_end: date) -> FiscalQuarter:
+        return FiscalQuarter(self.fiscal_year(period_end), self.fiscal_quarter(period_end))
+
+    def quarter_end(self, quarter: FiscalQuarter) -> date:
+        """The nominal last day of a fiscal quarter. A 52/53-week quarter ends within a
+        few days of it. Year ends on the last day of a month give quarters that end on
+        the last day of their months."""
+        year_end = self.year_end_in(quarter.fiscal_year)
+        months_back = 3 * (4 - quarter.fiscal_quarter)
+        month_index = year_end.year * 12 + year_end.month - 1 - months_back
+        year, month = divmod(month_index, 12)
+        month += 1
+        last_day = calendar.monthrange(year, month)[1]
+        month_end_year = year_end.day == calendar.monthrange(year_end.year, year_end.month)[1]
+        return date(year, month, last_day if month_end_year else min(year_end.day, last_day))
+
+    def quarter_ended_before(self, day: date) -> FiscalQuarter:
+        """The most recent fiscal quarter whose nominal end is before `day`, which is the
+        quarter an earnings release published on `day` reports."""
+        year = self.fiscal_year(day)
+        candidates = [
+            FiscalQuarter(fiscal_year, quarter)
+            for fiscal_year in (year - 1, year, year + 1)
+            for quarter in (1, 2, 3, 4)
+        ]
+        return max(q for q in candidates if self.quarter_end(q) < day)
 
     def year_start(self, fiscal_year: int) -> date:
         return self.year_end_in(fiscal_year - 1) + timedelta(days=1)

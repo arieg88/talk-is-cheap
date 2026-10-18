@@ -22,8 +22,9 @@ migrate: ## Apply all database migrations
 db-check: ## Report database connectivity, pgvector and migration status
 	uv run talk-is-cheap db-check
 
-ingest: ## Load every company in universe.yaml from SEC EDGAR (needs EDGAR_IDENTITY)
+ingest: ## Load every company in universe.yaml from SEC EDGAR, then parse filing text (needs EDGAR_IDENTITY)
 	uv run talk-is-cheap ingest edgar
+	uv run talk-is-cheap ingest filings
 
 lint: ## Check lint and formatting
 	uv run ruff check .

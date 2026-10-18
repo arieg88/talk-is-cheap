@@ -5,6 +5,13 @@ limit, caches responses on disk and pages through a company's full filing histor
 module only converts its objects into plain records (`talk_is_cheap.edgar.records`), so the
 rest of the code and its tests never depend on edgartools or the network.
 
+Filing documents come from the filing's full submission, which edgartools downloads once
+and caches; its attachment list gives each document's SEC type (the form, or an exhibit
+number such as EX-99.1) and URL. edgartools can also split 10-K and 10-Q documents into
+items, but its sections carry no offsets into a document's text and drop bold text, and
+it finds no MD&A in Intel's reports, which are titled rather than numbered; items are
+therefore split from the converted text instead (`talk_is_cheap.filings.sections`).
+
 edgartools is synchronous; async callers run these methods in a worker thread.
 
 edgartools is imported only inside the functions that use it: importing it loads pandas,
@@ -17,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
-from talk_is_cheap.edgar.records import CompanyInfo, FilingRecord, RawFact
+from talk_is_cheap.edgar.records import CompanyInfo, FilingDocument, FilingRecord, RawFact
 
 # edgartools renames some SEC units; map them back so config uses the SEC's own names.
 _SEC_UNITS = {"USD per share": "USD/shares", "number": "pure"}
@@ -38,6 +45,8 @@ class EdgarSource(Protocol):
         self, cik: int, *, concepts: Collection[str], period_end_from: date
     ) -> list[RawFact]: ...
 
+    def documents(self, filing: FilingRecord) -> list[FilingDocument]: ...
+
 
 def configure_edgartools(identity: str, data_dir: Path) -> None:
     """Set the SEC identity header and where edgartools keeps its response cache."""
@@ -54,11 +63,28 @@ def _edgartools_company(identifier: str | int) -> Any:
     return Company(identifier)
 
 
+def _edgartools_filing(filing: FilingRecord) -> Any:
+    from edgar import Filing
+
+    return Filing(
+        cik=filing.cik,
+        company="",
+        form=filing.form,
+        filing_date=filing.filing_date.isoformat(),
+        accession_no=filing.accession_no,
+    )
+
+
 class EdgartoolsSource:
     """`EdgarSource` backed by edgartools. Call `configure_edgartools` first."""
 
-    def __init__(self, company_factory: Callable[[str | int], Any] = _edgartools_company) -> None:
+    def __init__(
+        self,
+        company_factory: Callable[[str | int], Any] = _edgartools_company,
+        filing_factory: Callable[[FilingRecord], Any] = _edgartools_filing,
+    ) -> None:
         self._company_factory = company_factory
+        self._filing_factory = filing_factory
         self._companies: dict[int, Any] = {}
 
     def company(self, ticker: str) -> CompanyInfo:
@@ -93,6 +119,16 @@ class EdgartoolsSource:
         if entity_facts is None:
             return []  # the company has filed no XBRL financial data
         return raw_facts(entity_facts, concepts=concepts, period_end_from=period_end_from)
+
+    def documents(self, filing: FilingRecord) -> list[FilingDocument]:
+        """The filing's primary document and its EX-99 exhibits, when they are HTML."""
+        try:
+            attachments = list(self._filing_factory(filing).attachments)
+            return filing_documents(attachments, filing)
+        except Exception as exc:
+            raise EdgarSourceError(
+                f"documents failed for filing {filing.accession_no}: {exc}"
+            ) from exc
 
     def _company(self, cik: int) -> Any:
         if cik not in self._companies:
@@ -150,6 +186,36 @@ def filing_records(
             )
         )
     return records
+
+
+def filing_documents(attachments: Iterable[Any], filing: FilingRecord) -> list[FilingDocument]:
+    """Convert edgartools `Attachment`s, keeping the primary document and EX-99 exhibits
+    that are HTML."""
+    documents = []
+    for attachment in attachments:
+        name = str(attachment.document or "")
+        document_type = str(attachment.document_type or "").upper()
+        if not name.lower().endswith((".htm", ".html")):
+            continue
+        primary = name == filing.primary_document or (
+            filing.primary_document is None and document_type == filing.form
+        )
+        if not primary and not document_type.startswith("EX-99"):
+            continue
+        content = attachment.content
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        documents.append(
+            FilingDocument(
+                accession_no=filing.accession_no,
+                document_name=name,
+                document_type=document_type,
+                description=str(attachment.description) if attachment.description else None,
+                url=str(attachment.url),
+                html=str(content or ""),
+            )
+        )
+    return documents
 
 
 def raw_facts(

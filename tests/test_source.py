@@ -12,10 +12,12 @@ import pytest
 from edgar.entity.filings import COMPANY_FILINGS_SCHEMA
 from edgar.entity.parser import EntityFactsParser
 
+from talk_is_cheap.edgar.records import FilingRecord
 from talk_is_cheap.edgar.source import (
     EdgarSourceError,
     EdgartoolsSource,
     configure_edgartools,
+    filing_documents,
     filing_records,
     raw_facts,
 )
@@ -299,3 +301,88 @@ def test_source_wraps_errors_raised_by_lazy_company_loading() -> None:
     source = EdgartoolsSource(company_factory=lambda _: LazyCompany())
     with pytest.raises(EdgarSourceError, match="403 Forbidden"):
         source.company("AAPL")
+
+
+BASE_URL = "https://www.sec.gov/Archives/edgar/data/1/000000000125000040"
+
+
+def attachment(document: str, document_type: str, content: str | bytes = "<p>x</p>") -> Any:
+    return SimpleNamespace(
+        document=document,
+        document_type=document_type,
+        description=document_type,
+        url=f"{BASE_URL}/{document}",
+        content=content,
+    )
+
+
+ATTACHMENTS = [
+    attachment("q3.htm", "8-K"),
+    attachment("ex991.htm", "EX-99.1", b"<p>Press release</p>"),
+    attachment("ex992.htm", "EX-99.2"),
+    attachment("ex101.xsd", "EX-101.SCH"),
+    attachment("logo.jpg", "GRAPHIC"),
+    attachment("R1.htm", "XML"),
+    attachment("ex10.htm", "EX-10.1"),
+]
+
+
+def earnings_filing(primary: str | None = "q3.htm", form: str = "8-K") -> FilingRecord:
+    return FilingRecord(
+        accession_no="0000000001-25-000040",
+        cik=1,
+        form=form,
+        filing_date=date(2025, 10, 30),
+        report_date=None,
+        acceptance_datetime=None,
+        primary_document=primary,
+        items="2.02,9.01",
+        is_xbrl=True,
+    )
+
+
+def test_filing_documents_keep_primary_and_ex99_html() -> None:
+    documents = filing_documents(ATTACHMENTS, earnings_filing())
+    assert [(d.document_name, d.document_type) for d in documents] == [
+        ("q3.htm", "8-K"),
+        ("ex991.htm", "EX-99.1"),
+        ("ex992.htm", "EX-99.2"),
+    ]
+    release = documents[1]
+    assert release.html == "<p>Press release</p>"  # bytes are decoded
+    assert release.url == f"{BASE_URL}/ex991.htm"
+    assert release.accession_no == "0000000001-25-000040"
+
+
+def test_filing_documents_find_the_primary_by_form_when_unrecorded() -> None:
+    documents = filing_documents(
+        [attachment("q.htm", "10-Q"), attachment("other.htm", "EX-31.1")],
+        earnings_filing(primary=None, form="10-Q"),
+    )
+    assert [d.document_name for d in documents] == ["q.htm"]
+
+
+def test_source_fetches_documents_through_edgartools_filings() -> None:
+    requested: list[str] = []
+
+    def filing_factory(record: FilingRecord) -> SimpleNamespace:
+        requested.append(record.accession_no)
+        return SimpleNamespace(attachments=ATTACHMENTS)
+
+    source = EdgartoolsSource(
+        company_factory=lambda _: fake_company(), filing_factory=filing_factory
+    )
+    documents = source.documents(earnings_filing())
+    assert len(documents) == 3
+    assert requested == ["0000000001-25-000040"]
+
+
+def test_source_wraps_document_failures() -> None:
+    class Unreachable:
+        @property
+        def attachments(self) -> list[Any]:
+            raise ConnectionError("SEC unreachable")
+
+    source = EdgartoolsSource(filing_factory=lambda _: Unreachable())
+    with pytest.raises(EdgarSourceError, match=r"0000000001-25-000040.*SEC unreachable"):
+        source.documents(earnings_filing())

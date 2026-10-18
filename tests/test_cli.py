@@ -32,22 +32,38 @@ def test_db_check_reports_unreachable_database(
     assert "unreachable" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("source", ["edgar", "filings"])
 def test_ingest_requires_an_edgar_identity(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    source: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from talk_is_cheap.config import get_settings
 
-    monkeypatch.delenv("EDGAR_IDENTITY", raising=False)
+    # An empty variable overrides a local .env file and counts as unset.
+    monkeypatch.setenv("EDGAR_IDENTITY", "")
     get_settings.cache_clear()
     try:
-        assert main(["ingest", "edgar", "--tickers", "AAPL"]) == 1
+        assert main(["ingest", source, "--tickers", "AAPL"]) == 1
     finally:
         get_settings.cache_clear()
     assert "EDGAR_IDENTITY is not set" in capsys.readouterr().err
 
 
-def test_ingest_rejects_tickers_outside_the_universe(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["ingest", "edgar", "--tickers", "ZZZZ"]) == 1
+def test_show_rejects_malformed_periods(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["show", "NVDA", "2026-Q3", "outlook"]) == 1
+    assert "FY2026Q3" in capsys.readouterr().err
+
+
+def test_show_accepts_only_known_section_types() -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(["show", "NVDA", "latest", "guidance"])
+    assert exit_info.value.code == 2
+
+
+@pytest.mark.parametrize("source", ["edgar", "filings"])
+def test_ingest_rejects_tickers_outside_the_universe(
+    source: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["ingest", source, "--tickers", "ZZZZ"]) == 1
     assert "ZZZZ" in capsys.readouterr().err
 
 
@@ -61,3 +77,39 @@ def test_cli_startup_does_not_import_edgartools() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert result.stdout.strip() == "False False"
+
+
+# Commands that print more than `head -1` reads. "late" writes its last line after `head`
+# has exited, so the closed pipe only shows when Python flushes stdout at exit.
+_PRINTERS = {
+    "flood": "for n in range(200_000):\n        print(f'line {n}')",
+    "late": ("print('line 0', flush=True)\n    time.sleep(1)\n    print('line 1')"),
+}
+
+
+@pytest.mark.parametrize("printer", sorted(_PRINTERS))
+def test_output_piped_into_head_exits_quietly(printer: str) -> None:
+    """`talk-is-cheap show ... | head` stops reading early; that is not an error to report."""
+    import shlex
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, time\n"
+        "import talk_is_cheap.cli as cli\n"
+        "def run(args):\n"
+        f"    {_PRINTERS[printer]}\n"
+        "    return 0\n"
+        "cli._run = run\n"
+        "sys.exit(cli.main(['companies']))\n"
+    )
+    result = subprocess.run(
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} | head -1",
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    assert result.stdout == "line 0\n"
+    assert result.stderr == ""

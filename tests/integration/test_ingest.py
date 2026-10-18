@@ -13,7 +13,7 @@ from talk_is_cheap.cli import main
 from talk_is_cheap.db import create_session_factory
 from talk_is_cheap.db.models import Company, Filing, FinancialValue, XbrlFact
 from talk_is_cheap.edgar.ingest import ingest_edgar
-from talk_is_cheap.edgar.records import CompanyInfo, FilingRecord, RawFact
+from talk_is_cheap.edgar.records import CompanyInfo, FilingDocument, FilingRecord, RawFact
 from talk_is_cheap.edgar.source import EdgarSourceError
 from talk_is_cheap.financials import (
     company_summaries,
@@ -33,6 +33,8 @@ Q2 = ("0000990001-25-000002", "10-Q", date(2025, 7, 30))
 Q3 = ("0000990001-25-000003", "10-Q", date(2025, 10, 30))
 FY = ("0000990001-26-000001", "10-K", date(2026, 2, 20))
 NEXT_Q1 = ("0000990001-26-000002", "10-Q", date(2026, 4, 29))
+Q1_EARNINGS = ("0000990001-25-000004", "8-K", date(2025, 4, 24))
+Q2_DELIVERIES = ("0000990001-25-000005", "8-K", date(2025, 7, 2))
 
 
 def fact(
@@ -87,14 +89,85 @@ FILINGS = [
         report_date=None,
         acceptance_datetime=None,
         primary_document=None,
-        items=None,
+        items="2.02,9.01" if form == "8-K" else None,
         is_xbrl=True,
     )
-    for accession, form, filed in (Q1, Q2, Q3, FY, NEXT_Q1)
+    for accession, form, filed in (Q1, Q2, Q3, FY, NEXT_Q1, Q1_EARNINGS, Q2_DELIVERIES)
 ]
+
+PERIODIC_HTML = """<html><body>
+<table><tr><td>Item 2.</td><td>Management's Discussion and Analysis</td><td>3</td></tr>
+<tr><td>Item 1A.</td><td>Risk Factors</td><td>9</td></tr></table>
+<p><b>PART I</b></p>
+<p><b>Item 2. Management's Discussion and Analysis</b></p>
+<p>Revenue grew because customers bought more.</p>
+<p><b>Item 3. Quantitative and Qualitative Disclosures About Market Risk</b></p>
+<p>Rates moved.</p>
+<p><b>PART II</b></p>
+<p><b>Item 1A. Risk Factors</b></p>
+<p>There have been no material changes to our risk factors.</p>
+<p><b>Item 6. Exhibits</b></p>
+</body></html>"""
+
+ANNUAL_HTML = """<html><body>
+<p><b>Item 1A. Risk Factors</b></p>
+<p><b>Our customers may stop buying.</b></p>
+<p>Demand could fall.</p>
+<p><b>Item 1B. Unresolved Staff Comments</b></p>
+<p>None.</p>
+<p><b>Item 7. Management's Discussion and Analysis</b></p>
+<p>Revenue grew all year.</p>
+<p><b>Item 7A. Quantitative and Qualitative Disclosures About Market Risk</b></p>
+<p>Rates moved.</p>
+</body></html>"""
+
+RELEASE_HTML = """<html><body>
+<p><b>Talk Is Cheap Reports First Quarter 2025 Results</b></p>
+<p>Revenue for the first quarter ended March 31, 2025 was $100.</p>
+<p><b>Outlook</b></p>
+<p>Second quarter revenue is expected to be $110, plus or minus 2%.</p>
+<p><b>About Talk Is Cheap</b></p>
+<p>We test software.</p>
+</body></html>"""
+
+COMMENTARY_HTML = (
+    "<p><b>CFO Commentary</b></p><p>First quarter revenue was $100. GAAP gross margin was "
+    "60% and non-GAAP gross margin was 61%; operating expenses fell.</p>"
+)
+
+DELIVERIES_HTML = """<html><body>
+<p><b>Talk Is Cheap Second Quarter 2025 Production and Deliveries</b></p>
+<p>In the second quarter, we delivered 1,000 units.</p>
+</body></html>"""
+
+
+def documents_for(filing: FilingRecord) -> list[FilingDocument]:
+    base = f"https://www.sec.gov/Archives/edgar/data/{CIK}/{filing.accession_no.replace('-', '')}"
+    if filing.accession_no == Q2_DELIVERIES[0]:
+        named = [("ex991.htm", "EX-99.1", DELIVERIES_HTML)]
+    elif filing.form == "8-K":
+        named = [("ex991.htm", "EX-99.1", RELEASE_HTML), ("ex992.htm", "EX-99.2", COMMENTARY_HTML)]
+    else:
+        html = ANNUAL_HTML if filing.form == "10-K" else PERIODIC_HTML
+        named = [(f"{filing.form.lower()}.htm", filing.form, html)]
+    return [
+        FilingDocument(
+            accession_no=filing.accession_no,
+            document_name=name,
+            document_type=document_type,
+            description=None,
+            url=f"{base}/{name}",
+            html=html,
+        )
+        for name, document_type, html in named
+    ]
 
 
 class FakeSource:
+    def __init__(self, failing: frozenset[str] = frozenset()) -> None:
+        self.failing = failing  # accession numbers whose documents cannot be fetched
+        self.fetched: list[str] = []
+
     def company(self, ticker: str) -> CompanyInfo:
         if ticker != TICKER:
             raise EdgarSourceError(f"{ticker} was not found on EDGAR")
@@ -114,6 +187,12 @@ class FakeSource:
         return [
             f for f in FACTS if f.qualified_concept in concepts and f.period_end >= period_end_from
         ]
+
+    def documents(self, filing: FilingRecord) -> list[FilingDocument]:
+        if filing.accession_no in self.failing:
+            raise EdgarSourceError(f"documents failed for filing {filing.accession_no}")
+        self.fetched.append(filing.accession_no)
+        return documents_for(filing)
 
 
 UNIVERSE = Universe.model_validate(
@@ -149,11 +228,11 @@ async def test_ingest_loads_company_filings_facts_and_values(
     results = await ingest_edgar(FakeSource(), sessions, UNIVERSE)
 
     ok, failed = results
-    assert ok.ok and ok.cik == CIK and ok.filings == 5 and ok.new_facts == len(FACTS)
+    assert ok.ok and ok.cik == CIK and ok.filings == 7 and ok.new_facts == len(FACTS)
     assert not failed.ok and "not found" in (failed.error or "")
 
     async with sessions() as session:
-        assert await count(session, Filing, CIK) == 5
+        assert await count(session, Filing, CIK) == 7
         assert await count(session, XbrlFact, CIK) == len(FACTS)
         assert await count(session, FinancialValue, CIK) == ok.financial_values > 0
 
@@ -165,7 +244,7 @@ async def test_rerunning_is_idempotent(sessions: async_sessionmaker[AsyncSession
     assert second.new_facts == 0
     assert second.financial_values == first.financial_values
     async with sessions() as session:
-        assert await count(session, Filing, CIK) == 5
+        assert await count(session, Filing, CIK) == 7
         assert await count(session, XbrlFact, CIK) == len(FACTS)
         assert await count(session, FinancialValue, CIK) == first.financial_values
 
@@ -200,7 +279,7 @@ async def test_restatements_and_summaries(sessions: async_sessionmaker[AsyncSess
 
     assert [(c.metric, c.fiscal_year, c.fiscal_quarter) for c in changes] == [("revenue", 2025, 1)]
     assert changes[0].change == Decimal("0.05")
-    assert (summary.filings, summary.latest_quarter) == (5, "FY2026 Q1")
+    assert (summary.filings, summary.latest_quarter) == (7, "FY2026 Q1")
     assert company is not None and company.name == "Talk Is Cheap Test Co"
 
 
