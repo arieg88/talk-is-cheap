@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: talkischeap
+          POSTGRES_PASSWORD: talkischeap
+          POSTGRES_DB: talkischeap
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U talkischeap -d talkischeap"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql+psycopg://talkischeap:talkischeap@localhost:5432/talkischeap
+      REQUIRE_DATABASE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Migrate
+        run: uv run alembic upgrade head
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Database status
+        run: uv run talk-is-cheap db-check
