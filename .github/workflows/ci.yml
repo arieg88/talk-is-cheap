@@ -24,6 +24,8 @@ jobs:
           --health-retries 30
     env:
       DATABASE_URL: postgresql+psycopg://talkischeap:talkischeap@localhost:5432/talkischeap
+      # Tests drop, recreate and migrate their own database on the same server.
+      TEST_DATABASE_URL: postgresql+psycopg://talkischeap:talkischeap@localhost:5432/talkischeap_test
       REQUIRE_DATABASE: "1"
     steps:
       - uses: actions/checkout@v4

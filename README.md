@@ -195,6 +195,7 @@ All settings are environment variables. See `.env.example`.
 | `FEEDS_FILE` | `feeds.yaml` | News feeds and backfill sources |
 | `NEWS_USER_AGENT` | `talk-is-cheap/0.1 (news headline collector; metadata only)` | User-Agent sent to news feeds and GDELT |
 | `DATABASE_URL` | local Docker database | Must use the `postgresql+psycopg://` driver prefix |
+| `TEST_DATABASE_URL` | `talkischeap_test` on the local Docker server | Database the tests drop and recreate; the name must end in `_test`. Read from the shell only, not from `.env`. |
 | `DATABASE_ECHO` | `false` | Log every SQL statement |
 | `DATABASE_POOL_SIZE` | `5` | Connection pool size, 1 to 50 |
 | `ENVIRONMENT` | `local` | `local`, `test` or `production` |
@@ -269,5 +270,7 @@ talk-is-cheap/
 make test        # all tests; integration tests are skipped if no database is reachable
 make test-unit   # only tests that need no database
 ```
+
+Integration tests never touch the database in `DATABASE_URL`. Each test run drops, recreates and migrates its own database, `talkischeap_test` on the local Docker server, so tests start from an empty database, as in CI. Set `TEST_DATABASE_URL` in the shell to use another one; its name must end in `_test`. Tests read neither `.env` nor the application's variables from the shell: they run with the defaults, and tests that need a setting set it themselves.
 
 Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; and polling, backfill and the news commands run end to end against the database with mocked feeds. Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.

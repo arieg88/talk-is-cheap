@@ -38,8 +38,7 @@ def test_ingest_requires_an_edgar_identity(
 ) -> None:
     from talk_is_cheap.config import get_settings
 
-    # An empty variable overrides a local .env file and counts as unset.
-    monkeypatch.setenv("EDGAR_IDENTITY", "")
+    monkeypatch.delenv("EDGAR_IDENTITY", raising=False)
     get_settings.cache_clear()
     try:
         assert main(["ingest", source, "--tickers", "AAPL"]) == 1

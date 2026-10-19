@@ -582,16 +582,7 @@ def news_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Non
     get_settings.cache_clear()
 
 
-@pytest.fixture
-def private_locks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Lock keys of the test's own, so a real poll or backfill running against the same
-    database neither blocks the test nor is blocked by it."""
-    monkeypatch.setattr(locks, "POLL_LOCK", locks.POLL_LOCK + 1000)
-    monkeypatch.setattr(locks, "BACKFILL_LOCK", locks.BACKFILL_LOCK + 1000)
-
-
 async def test_cli_ingest_feeds_and_news(
-    private_locks: None,
     engine: AsyncEngine,
     sessions: async_sessionmaker[AsyncSession],
     feeds_mock: respx.MockRouter,
@@ -622,8 +613,36 @@ async def test_cli_ingest_feeds_and_news(
         assert "yahoo_finance:TICA                ok" in out
         assert "rss:test-market                   ok" in out
         assert "gdelt:" not in out
+
+        # No backfill has run against the new test database yet.
         assert await asyncio.to_thread(run, "feeds", "--backfill") == 0
-        assert capsys.readouterr().out.startswith("SOURCE")
+        assert capsys.readouterr().out == (
+            "no backfill run yet; run `talk-is-cheap ingest news --backfill --since ...`\n"
+        )
+        async with sessions() as session, session.begin():
+            source = Feed(
+                key="gdelt:TICA", type="gdelt", url=API_URL, ticker="TICA", consecutive_failures=0
+            )
+            session.add(source)
+            await session.flush()
+            session.add(
+                BackfillWindow(
+                    feed_id=source.id,
+                    window_start=datetime(2025, 1, 6, tzinfo=UTC),
+                    window_end=datetime(2025, 1, 13, tzinfo=UTC),
+                    requests=1,
+                    items=0,
+                    new_articles=0,
+                    truncated=False,
+                )
+            )
+        assert await asyncio.to_thread(run, "feeds", "--backfill") == 0
+        table = capsys.readouterr().out.splitlines()
+        assert table[0].startswith("SOURCE")
+        assert table[1] == (
+            "gdelt:TICA         1  2025-01-06 to 2025-01-13        0     0  never             0  "
+        )
+        assert len(table) == 2
 
         # A poll that starts while another holds the lock exits quietly.
         async with locks.advisory_locks(engine, locks.POLL_LOCK) as locked:
