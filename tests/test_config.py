@@ -96,3 +96,14 @@ def test_rejects_edgar_identity_without_name_and_email(
 def test_blank_edgar_identity_counts_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EDGAR_IDENTITY", "   ")
     assert make_settings().edgar_identity is None
+
+
+def test_llm_settings_treat_empty_values_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("LLM_API_KEY", "LLM_EFFORT", "LLM_INPUT_PRICE", "LLM_OUTPUT_PRICE"):
+        monkeypatch.setenv(name, "")
+    settings = Settings()
+    assert settings.llm_api_key is None and settings.llm_effort is None
+    assert (settings.llm_input_price, settings.llm_output_price) == (None, None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-anthropic-name")
+    assert Settings().llm_api_key is not None
+    assert "sk-from" not in repr(Settings())  # the key is never shown

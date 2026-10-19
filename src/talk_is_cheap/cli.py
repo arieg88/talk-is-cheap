@@ -38,6 +38,11 @@ from talk_is_cheap.financials import (
 from talk_is_cheap.universe import Universe, UniverseCompany, load_universe
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from talk_is_cheap.db.models import Guidance
+    from talk_is_cheap.guidance.extract import DryRun
+    from talk_is_cheap.guidance.llm import Budget, Pricing
     from talk_is_cheap.news.gdelt import BackfillProgress
     from talk_is_cheap.news.queries import BackfillSource
 
@@ -978,6 +983,488 @@ async def _eval_retrieval(
     return 0
 
 
+# Guidance extraction imports LangChain and a provider SDK only when a model is built.
+
+
+async def _llm_budget(
+    sessions: "async_sessionmaker[AsyncSession]", pricing: "Pricing", command: str
+) -> "Budget":
+    """A budget for one command: its cost cap, the project's total budget less what the
+    ledger has recorded, and the ledger to record its calls."""
+    from talk_is_cheap.guidance.llm import Budget
+    from talk_is_cheap.spend import DatabaseLedger, counted_spend
+
+    settings = get_settings()
+    async with sessions() as session:
+        spent = await counted_spend(session)
+    return Budget(
+        settings.llm_cost_cap,
+        pricing,
+        limit=settings.llm_budget_usd,
+        spent_before=spent,
+        ledger=DatabaseLedger(sessions, command),
+    )
+
+
+def _budget_line(budget: "Budget") -> str:
+    assert budget.limit is not None
+    remaining = max(budget.limit - budget.total_spent, Decimal(0))
+    return (
+        f"LLM budget: ${budget.total_spent:.4f} of ${budget.limit:.2f} spent, "
+        f"${remaining:.4f} remaining (talk-is-cheap spend)"
+    )
+
+
+async def _extract_guidance(
+    tickers: Sequence[str] | None, model: str | None, dry: bool, missing_only: bool
+) -> int:
+    from talk_is_cheap.guidance.extract import (
+        ExtractResult,
+        company_ciks,
+        dry_run,
+        extract_guidance,
+    )
+    from talk_is_cheap.guidance.llm import (
+        CacheOnlyModel,
+        ExtractionModel,
+        LlmError,
+        Pricing,
+        ResponseCache,
+        build_model,
+        model_label,
+        pricing_for,
+    )
+    from talk_is_cheap.guidance.matching import load_split_config, sync_splits
+
+    names = _company_names()
+    if names is None:
+        return 1
+    settings = get_settings()
+    label = model_label(settings, model)
+    pricing = pricing_for(label, settings)
+    cache = ResponseCache(settings.llm_cache_dir)
+    engine = create_engine(settings)
+    try:
+        if not await _database_reachable(engine):
+            return 1
+        sessions = create_session_factory(engine)
+        async with sessions() as session:
+            try:
+                ciks = await company_ciks(session, tickers)
+            except ValueError as exc:
+                print(exc, file=sys.stderr)
+                return 1
+        plan = await dry_run(
+            sessions, label, cache, pricing, ciks=list(ciks.values()), names=names,
+            missing_only=missing_only,
+        )  # fmt: skip
+        if dry:
+            _print_plan(plan, label, settings.llm_cost_cap)
+            if pricing is not None:
+                print(_budget_line(await _llm_budget(sessions, pricing, "extract guidance")))
+            return 0
+        if plan.calls and pricing is None:
+            print(
+                f"no price known for {label}: set LLM_INPUT_PRICE and LLM_OUTPUT_PRICE "
+                "(US dollars per million tokens)",
+                file=sys.stderr,
+            )
+            return 1
+        extractor: ExtractionModel
+        if plan.calls == 0:
+            extractor = CacheOnlyModel(label)
+        else:
+            try:
+                extractor = build_model(settings, model)
+            except LlmError as exc:
+                print(f"{exc}; {plan.calls} documents need a model call", file=sys.stderr)
+                return 1
+        budget = await _llm_budget(
+            sessions, pricing or Pricing(Decimal(0), Decimal(0)), "extract guidance"
+        )
+        async with sessions() as session, session.begin():
+            await sync_splits(session, load_split_config())
+        print(
+            f"model {label}, {plan.calls} calls planned (estimated "
+            f"${plan.estimated_cost or 0:.2f}), cost cap ${settings.llm_cost_cap}",
+            flush=True,
+        )
+
+        def report(r: ExtractResult) -> None:
+            if not r.documents:
+                print(
+                    f"{r.ticker:<6} {r.releases} releases, no outlook with guidance: "
+                    f"{r.rows} rows (expected)",
+                    flush=True,
+                )
+                return
+            verdicts = ", ".join(
+                f"{n} {v}"
+                for v, n in sorted(r.verdicts.items())
+                if v not in ("needs_review", "wrong")
+            )
+            if r.verdicts.get("needs_review") or r.verdicts.get("wrong"):
+                verdicts += (
+                    f"; {r.verdicts.get('needs_review', 0)} need review, "
+                    f"{r.verdicts.get('wrong', 0)} reviewed as wrong"
+                )
+            reprocessed = f"{r.reprocessed} reprocessed, " if r.reprocessed else ""
+            print(
+                f"{r.ticker:<6} {r.documents} documents ({r.up_to_date} up to date, "
+                f"{reprocessed}{r.cached} cached, {r.called} called), {r.items} items, {r.dropped} "
+                f"dropped, {r.rows} rows ({verdicts or 'none'}), "
+                f"{r.usage.input_tokens:,}/{r.usage.output_tokens:,} tokens, ${r.cost:.4f}, "
+                f"{r.seconds:.0f}s",
+                file=sys.stdout if r.ok else sys.stderr,
+                flush=True,
+            )
+            for quote in r.dropped_quotes:
+                print(f"       dropped (quote not found): {quote!r}", flush=True)
+            for error in r.errors:
+                print(f"       FAILED {error}", file=sys.stderr, flush=True)
+
+        results = await extract_guidance(
+            sessions, extractor, cache, budget, ciks=list(ciks.values()), names=names,
+            missing_only=missing_only, on_result=report,
+        )  # fmt: skip
+    finally:
+        await engine.dispose()
+    rows = sum(r.rows for r in results)
+    dropped = sum(r.dropped for r in results)
+    print(
+        f"done: {rows} guidance rows, {dropped} items dropped by grounding, {budget.calls} "
+        f"model calls, {budget.usage.input_tokens:,} input and {budget.usage.output_tokens:,} "
+        f"output tokens, ${budget.spent:.4f}"
+    )
+    print(_budget_line(budget))
+    return 0 if all(r.ok for r in results) else 1
+
+
+def _print_plan(plan: "DryRun", label: str, cap: Decimal) -> None:
+    print(f"dry run: model {label}, no calls made\n")
+    print(f"{'TICKER':<7}{'RELEASES':>9}{'DOCS':>6}{'UP TO DATE':>11}{'REPROCESS':>10}{'CACHED':>8}"
+          f"{'CALLS':>7}{'EST. IN':>10}{'EST. OUT':>10}")  # fmt: skip
+    for p in plan.plans:
+        estimated = p.estimated
+        print(
+            f"{p.ticker:<7}{p.releases:>9}{len(p.documents):>6}{p.count('up_to_date'):>11}"
+            f"{p.count('reprocess'):>10}{p.count('cached'):>8}{p.count('call'):>7}{estimated.input_tokens:>10,}"
+            f"{estimated.output_tokens:>10,}"
+        )
+    total = plan.estimated
+    cost = plan.estimated_cost
+    print(
+        f"\n{plan.calls} calls, about {total.input_tokens:,} input and at most "
+        f"{total.output_tokens:,} output tokens, "
+        + (f"estimated cost at most ${cost:.2f}" if cost is not None else "no price known")
+        + f" (cost cap ${cap})"
+    )
+
+
+def _amount(value: Decimal | None, unit: str) -> str:
+    if value is None:
+        return "-"
+    if unit == "pct":
+        return f"{value.quantize(Decimal('0.01')).normalize():f}%"
+    if unit == "usd_per_share":
+        return f"${value:.2f}" if value >= 0 else f"-${-value:.2f}"
+    if unit == "usd":
+        sign = "-" if value < 0 else ""
+        size = abs(value)
+        if size >= 10**9:
+            return f"{sign}${size / 10**9:,.3f}".rstrip("0").rstrip(".") + "B"
+        return f"{sign}${size / 10**6:,.1f}M"
+    return f"{value.normalize():,f}"
+
+
+def _guided(row: "Guidance") -> str:
+    if row.low is not None and row.high is not None:
+        text = f"{_amount(row.low, row.unit)} to {_amount(row.high, row.unit)}"
+    elif row.point is not None:
+        text = f"~{_amount(row.point, row.unit)}"
+    elif row.low is not None:
+        text = f">= {_amount(row.low, row.unit)}"
+    elif row.high is not None:
+        text = f"<= {_amount(row.high, row.unit)}"
+    else:
+        return (row.qualitative or row.value_text or "")[:40]
+    return text
+
+
+def _difference(row: "Guidance") -> str:
+    if row.difference is None:
+        return ""
+    if row.unit == "pct":
+        return f"{row.difference:+.2f}pp"
+    sign = "+" if row.difference >= 0 else "-"
+    text = sign + _amount(abs(row.difference), row.unit)
+    if row.percent_difference is not None:
+        text += f" ({row.percent_difference:+.1f}%)"
+    return text
+
+
+def _metric_label(row: "Guidance") -> str:
+    label = row.metric
+    if row.segment:
+        label += f" [{row.segment[:20]}]"
+    if row.measure != "level":
+        label += {"yoy_growth": " y/y", "sequential_growth": " q/q",
+                  "share_of_revenue": " %rev"}[row.measure]  # fmt: skip
+    if row.constant_currency:
+        label += " cc"
+    if row.basis != "unspecified":
+        label += " (GAAP)" if row.basis == "gaap" else " (non-GAAP)"
+    return label
+
+
+async def _guidance(ticker: str, metric: str | None, limit: int | None, flagged_only: bool) -> int:
+    from sqlalchemy import select
+
+    from talk_is_cheap.db.models import Company
+    from talk_is_cheap.guidance.matching import counts_in_verdicts, needs_review
+    from talk_is_cheap.guidance.queries import company_guidance
+
+    engine = create_engine(get_settings())
+    try:
+        async with create_session_factory(engine)() as session:
+            names = {
+                cik: symbol
+                for cik, symbol in (await session.execute(select(Company.cik, Company.ticker)))
+            }
+            company = None
+            if ticker.lower() != "all":
+                company = await find_company(session, ticker)
+                if company is None:
+                    print(f"{ticker.upper()} is not loaded", file=sys.stderr)
+                    return 1
+            rows = await company_guidance(
+                session, company.cik if company else None, metric, flagged_only=flagged_only
+            )
+    finally:
+        await engine.dispose()
+    who = f"{company.name} ({company.ticker})" if company else "All companies"
+    if not rows:
+        print(f"{who}: no guidance rows" + (" flagged" if flagged_only else "")
+              + "; run `talk-is-cheap extract guidance`" * (not flagged_only))  # fmt: skip
+        return 0
+    print(f"{who}: guidance, newest first. Actuals as first reported; pp = percentage "
+          "points. REVIEW marks a guided value implausible against the company's prior "
+          "period; such rows and rows reviewed as wrong are left out of the counts.\n")  # fmt: skip
+    print(
+        f"{'ID':>6}  {'' if company else 'TICKER  '}{'ISSUED':<10}{'TARGET':<10}{'METRIC':<34}"
+        f"{'GUIDED':<26}{'ACTUAL':<13}{'VERDICT':<15}DIFFERENCE"
+    )
+    for found in rows[:limit] if limit else rows:
+        row = found.guidance
+        target = "-"
+        if row.target_fiscal_year is not None:
+            target = f"FY{row.target_fiscal_year}" + (
+                f"Q{row.target_fiscal_quarter}" if row.target_fiscal_quarter else ""
+            )
+        verdict = row.verdict if row.verdict != "not_comparable" else "not comparable"
+        mark = "REVIEW " if needs_review(row) else "WRONG  " if row.review == "wrong" else ""
+        print(
+            f"{row.id:>6}  {'' if company else f'{names.get(row.cik, "?"):<8}'}"
+            f"{f'FY{row.fiscal_year}Q{row.fiscal_quarter}':<10}{target:<10}"
+            f"{_metric_label(row)[:33]:<34}{_guided(row)[:25]:<26}"
+            f"{_amount(row.actual, row.unit):<13}{mark}{verdict:<15}{_difference(row)}"
+        )
+        pad = " " * (8 if company else 16)
+        if row.plausibility == "flagged":
+            state = {None: "needs review", "ok": "reviewed: ok", "wrong": "reviewed: wrong"}
+            print(f"{pad}{state[row.review]} ({row.plausibility_rule}): {row.plausibility_note}")
+        elif row.review == "wrong":
+            print(f"{pad}reviewed: wrong")
+        notes = []
+        if row.verdict in ("not_comparable", "pending") and row.verdict_reason:
+            notes.append(row.verdict_reason)
+        if row.basis_assumed:
+            notes.append("basis not stated, compared as GAAP")
+        if notes:
+            print(f"{pad}{'; '.join(notes)}")
+        if row.conditions:
+            print(f"{pad}conditions: {row.conditions}")
+        for source in found.sources[:1]:
+            print(f"{pad}{source.url} chars {source.char_start}-{source.char_end}")
+    counted = [found.guidance for found in rows if counts_in_verdicts(found.guidance)]
+    tally = {v: sum(r.verdict == v for r in counted) for v in
+             ("beat", "met", "missed", "pending", "not_comparable")}  # fmt: skip
+    flagged = sum(needs_review(found.guidance) for found in rows)
+    wrong = sum(found.guidance.review == "wrong" for found in rows)
+    print(
+        f"\n{len(rows)} rows: "
+        + ", ".join(f"{n} {v.replace('_', ' ')}" for v, n in tally.items())
+        + f"; {flagged} need review, {wrong} reviewed as wrong (not counted)"
+    )
+    return 0
+
+
+async def _review_guidance(row_id: str, decision: str) -> int:
+    from talk_is_cheap.guidance.review import review
+
+    if not row_id.isdigit():
+        print(f"guidance review takes a row ID, got {row_id!r}", file=sys.stderr)
+        return 2
+    engine = create_engine(get_settings())
+    try:
+        async with create_session_factory(engine)() as session, session.begin():
+            try:
+                summary = await review(session, int(row_id), decision)
+            except LookupError as exc:
+                print(exc, file=sys.stderr)
+                return 1
+    finally:
+        await engine.dispose()
+    print(summary)
+    return 0
+
+
+async def _eval_guidance(labels_file: Path, models: Sequence[str] | None, details: bool) -> int:
+    from talk_is_cheap.guidance.evaluate import KINDS, evaluate, labeled_documents, load_labels
+    from talk_is_cheap.guidance.llm import (
+        LlmError,
+        ResponseCache,
+        build_model,
+        model_label,
+        pricing_for,
+    )
+
+    try:
+        labels = load_labels(labels_file)
+    except (OSError, ValueError) as exc:
+        print(f"cannot use {labels_file}: {exc}", file=sys.stderr)
+        return 1
+    names = _company_names()
+    if names is None:
+        return 1
+    settings = get_settings()
+    cache = ResponseCache(settings.llm_cache_dir)
+    engine = create_engine(settings)
+    scores = []
+    try:
+        if not await _database_reachable(engine):
+            return 1
+        try:
+            documents = await labeled_documents(create_session_factory(engine), labels, names)
+        except ValueError as exc:
+            print(f"cannot use {labels_file}: {exc}", file=sys.stderr)
+            return 1
+        sections = sum(len(d.source.sections) for _, d, _ in documents)
+        companies = len({label.ticker for label, _, _ in documents})
+        print(
+            f"{len(documents)} documents ({sections} outlook sections, {companies} companies), "
+            f"{sum(len(label.items) for label, _, _ in documents)} labeled items\n"
+        )
+        groups = "".join(f"{g:<21}" for g in ("ALL", *(k.upper() for k in KINDS)))
+        print(f"{'':<26}{groups}")
+        print(f"{'MODEL':<26}" + f"{'P':>7}{'R':>7}{'F1':>7}" * 3
+              + f"{'FIGURES':>8}{'PERIOD':>7}{'COND':>6}{'SPUR':>6}{'DROP':>5}{'ERR':>4}"
+              f"{'IN/DOC':>8}{'OUT/DOC':>8}{'$/DOC':>8}")  # fmt: skip
+        for name in models or [settings.llm_model]:
+            label = model_label(settings, name)
+            pricing = pricing_for(label, settings)
+            if pricing is None:
+                print(f"{label}: no price known; set LLM_INPUT_PRICE and LLM_OUTPUT_PRICE")
+                return 1
+            try:
+                model = build_model(settings, name)
+            except LlmError as exc:
+                print(exc, file=sys.stderr)
+                return 1
+            budget = await _llm_budget(create_session_factory(engine), pricing, "eval guidance")
+            score = await evaluate(documents, model, cache, budget)
+            scores.append(score)
+            n = max(len(score.documents), 1)
+            columns = "".join(
+                f"{score.precision(k):>7.3f}{score.recall(k):>7.3f}{score.f1(k):>7.3f}"
+                for k in (None, *KINDS)
+            )
+            print(
+                f"{label[:25]:<26}{columns}"
+                f"{score.figures_exact:>8.3f}{score.period_accuracy:>7.3f}"
+                f"{score.conditions_captured:>6.2f}{score.conditions_spurious:>6.2f}"
+                f"{score.dropped:>5}{score.errors:>4}"
+                f"{score.usage.input_tokens // n:>8,}{score.usage.output_tokens // n:>8,}"
+                f"{score.cost / n:>8.4f}",
+                flush=True,
+            )
+            if budget.calls:
+                print(f"{'':<26}this run: {budget.calls} calls, ${budget.spent:.4f}")
+                print(f"{'':<26}{_budget_line(budget)}")
+    finally:
+        await engine.dispose()
+    if details:
+        for score in scores:
+            print(f"\n== {score.model}")
+            for d in score.documents:
+                wrong_pairs = [
+                    (lab, got) for lab, got in d.matched
+                    if (lab.target, lab.low, lab.high, lab.point, lab.unit)
+                    != (got.target, got.low, got.high, got.point, got.unit)
+                ]  # fmt: skip
+                if not (d.missed or d.extra or d.error or wrong_pairs):
+                    continue
+                print(f"{d.id}: {len(d.matched)}/{d.labeled} matched, {len(d.extra)} extra"
+                      + (f", ERROR {d.error}" if d.error else ""))  # fmt: skip
+                for item in d.missed:
+                    target = item.target.label if item.target else "-"
+                    print(f"   missed {item.metric}/{item.basis}/{item.measure} {target}: "
+                          f"{item.quote[:90]!r}")  # fmt: skip
+                for extra in d.extra:
+                    target = extra.target.label if extra.target else "-"
+                    quote = extra.sources[0].quote[:90] if extra.sources else ""
+                    print(f"   extra  {extra.metric}/{extra.basis}/{extra.measure} {target}: "
+                          f"{quote!r}")  # fmt: skip
+                for label_item, got in d.matched:
+                    wrong = []
+                    if label_item.target != got.target:
+                        wrong.append(f"period {got.target} != {label_item.target}")
+                    if (label_item.low, label_item.high, label_item.point, label_item.unit) != (
+                        got.low, got.high, got.point, got.unit
+                    ):  # fmt: skip
+                        wrong.append(
+                            f"figures {got.low}/{got.high}/{got.point} {got.unit} != "
+                            f"{label_item.low}/{label_item.high}/{label_item.point} "
+                            f"{label_item.unit}"
+                        )
+                    if wrong:
+                        print(f"   wrong  {label_item.metric}/{label_item.basis}: "
+                              + "; ".join(wrong))  # fmt: skip
+    return 0
+
+
+async def _spend() -> int:
+    from talk_is_cheap.spend import spend_report
+
+    settings = get_settings()
+    engine = create_engine(settings)
+    try:
+        async with create_session_factory(engine)() as session:
+            report = await spend_report(session)
+    finally:
+        await engine.dispose()
+    budget = settings.llm_budget_usd
+    print(
+        f"LLM spending: ${report.total:.4f} of ${budget:.2f} budget (LLM_BUDGET_USD), "
+        f"${max(budget - report.total, Decimal(0)):.4f} remaining, {report.calls} calls\n"
+    )
+    for title, lines in (("COMMAND", report.by_command), ("MODEL", report.by_model)):
+        print(f"{title:<28}{'CALLS':>7}{'INPUT':>12}{'OUTPUT':>12}{'COST':>11}")
+        for line in lines:
+            print(
+                f"{line.key[:27]:<28}{line.calls:>7}{line.input_tokens:>12,}"
+                f"{line.output_tokens:>12,}{f'${line.cost:.4f}':>11}"
+            )
+        if not lines:
+            print("(no calls recorded)")
+        print()
+    if report.notes:
+        print("Not counted toward the budget:")
+        for note in report.notes:
+            print(f"  {note.model}: ${note.cost:.4f} ({note.note})")
+    return 0
+
+
 _TICKERS_HELP = "comma-separated tickers from universe.yaml (default: all)"
 
 
@@ -988,6 +1475,9 @@ def _tickers(text: str) -> list[str]:
 # Search mode `search` uses unless --mode is given, chosen by the retrieval benchmark
 # (docs/retrieval.md).
 DEFAULT_SEARCH_MODE = "rerank"
+# guidance/schema.py: Metric, repeated so the CLI does not import pydantic models.
+GUIDANCE_METRICS = ("revenue", "gross_margin", "operating_margin", "operating_expenses",
+                    "operating_income", "eps", "capex", "tax_rate", "other")  # fmt: skip
 DOC_TYPES = ("press_release", "earnings_exhibit", "10q", "10k", "deliveries_report",
              "other_exhibit", "news")  # fmt: skip
 
@@ -1147,6 +1637,70 @@ def build_parser() -> argparse.ArgumentParser:
         "--details", action="store_true", help="also print each question's rank per mode"
     )
 
+    guidance_eval = benchmarks.add_parser(
+        "guidance",
+        help="precision, recall, figures and periods of guidance extraction on labeled "
+        "outlook sections",
+    )
+    guidance_eval.add_argument(
+        "--labels",
+        type=Path,
+        default=Path("evals/guidance/labels.jsonl"),
+        help="labeled documents (default evals/guidance/labels.jsonl)",
+    )
+    guidance_eval.add_argument(
+        "--models",
+        type=_tickers,
+        help="comma-separated models of the configured provider (default LLM_MODEL)",
+    )
+    guidance_eval.add_argument(
+        "--details", action="store_true", help="also list missed, extra and wrong items"
+    )
+
+    extract = commands.add_parser("extract", help="extract structured data with an LLM")
+    extracted = extract.add_subparsers(dest="target", required=True)
+    guidance_extract = extracted.add_parser(
+        "guidance", help="guidance from the outlook sections of earnings releases (incremental)"
+    )
+    guidance_extract.add_argument("--tickers", type=_tickers, help=_TICKERS_HELP)
+    guidance_extract.add_argument(
+        "--model", help="model of the configured provider (default LLM_MODEL)"
+    )
+    guidance_extract.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="only documents never extracted; keep those extracted with another model",
+    )
+    guidance_extract.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the calls, tokens and cost a run would take, and make no call",
+    )
+
+    commands.add_parser(
+        "spend", help="LLM spending recorded in the ledger, by command and model, and budget"
+    )
+
+    guided = commands.add_parser(
+        "guidance",
+        help="a company's guidance against reported results, newest first; or `guidance "
+        "review ID --ok|--wrong`",
+    )
+    guided.add_argument("ticker", help="a ticker, `all`, or `review` followed by a row ID")
+    guided.add_argument("row", nargs="?", help="with `review`: the row ID shown by `guidance`")
+    guided.add_argument("--metric", choices=GUIDANCE_METRICS, help="only this metric")
+    guided.add_argument("--limit", type=int, help="rows shown (default all)")
+    guided.add_argument(
+        "--flagged", action="store_true", help="only rows flagged by the plausibility check"
+    )
+    decision = guided.add_mutually_exclusive_group()
+    decision.add_argument(
+        "--ok", action="store_true", help="with `review`: the row is right; clear its flag"
+    )
+    decision.add_argument(
+        "--wrong", action="store_true", help="with `review`: the row is wrong; leave it out"
+    )
+
     covered = commands.add_parser(
         "coverage", help="documents and sections found per company and fiscal quarter"
     )
@@ -1243,10 +1797,28 @@ def _run(args: argparse.Namespace) -> int:
             return asyncio.run(_index(args.tickers, args.rebuild))
         case "search":
             return asyncio.run(_search(args))
+        case "eval" if args.benchmark == "guidance":
+            return asyncio.run(_eval_guidance(args.labels, args.models, args.details))
         case "eval":
             return asyncio.run(
                 _eval_retrieval(args.questions, args.modes, args.filtered, args.details)
             )
+        case "extract":
+            return asyncio.run(
+                _extract_guidance(args.tickers, args.model, args.dry_run, args.missing_only)
+            )
+        case "spend":
+            return asyncio.run(_spend())
+        case "guidance" if args.ticker == "review":
+            if args.row is None or not (args.ok or args.wrong):
+                print("usage: talk-is-cheap guidance review ID --ok|--wrong", file=sys.stderr)
+                return 2
+            return asyncio.run(_review_guidance(args.row, "ok" if args.ok else "wrong"))
+        case "guidance":
+            if args.row is not None or args.ok or args.wrong:
+                print("--ok, --wrong and a row ID only go with `guidance review`", file=sys.stderr)
+                return 2
+            return asyncio.run(_guidance(args.ticker, args.metric, args.limit, args.flagged))
         case "feeds":
             return asyncio.run(_feeds(args.backfill))
         case "news":

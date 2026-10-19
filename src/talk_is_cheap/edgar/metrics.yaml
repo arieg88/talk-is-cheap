@@ -71,3 +71,21 @@ capex:
   concepts:
     - us-gaap:PaymentsToAcquirePropertyPlantAndEquipment
     - us-gaap:PaymentsToAcquireProductiveAssets
+
+operating_expenses:
+  unit: USD
+  additive: true
+  concepts:
+    # Operating expenses below gross profit (Nvidia, Cisco, Adobe, Salesforce, AMD,
+    # Intel, Tesla, Microsoft). Companies without that subtotal (Meta, Amazon, Qualcomm,
+    # Oracle) tag total costs and expenses, cost of revenue included, which is what
+    # Meta guides as "total expenses".
+    - us-gaap:OperatingExpenses
+    - us-gaap:CostsAndExpenses
+
+finance_lease_principal_payments:
+  unit: USD
+  additive: true
+  concepts:
+    # Meta's capital expenditure guidance includes these (guidance/matching.py).
+    - us-gaap:FinanceLeasePrincipalPayments

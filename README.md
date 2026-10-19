@@ -9,7 +9,7 @@ An AI analyst for public companies that compares what management says with what 
 **Financial data from SEC EDGAR**
 
 - Loads 15 companies (listed in `universe.yaml`) from SEC EDGAR through [edgartools](https://github.com/dgunning/edgartools): company details, the filing index (10-K, 10-Q, 8-K and amendments) and XBRL financial facts.
-- Normalizes facts into quarterly and annual values for nine metrics: revenue, cost of revenue, gross profit, operating income, net income, diluted EPS, R&D, operating cash flow and capex (`metrics.yaml`).
+- Normalizes facts into quarterly and annual values for eleven metrics: revenue, cost of revenue, gross profit, operating income, operating expenses, net income, diluted EPS, R&D, operating cash flow, capex and principal payments on finance leases (`metrics.yaml`).
 - Keeps every version of every value, one per filing that reported it, so numbers can be read **as first reported** or **as latest reported**, and restatements can be listed.
 - Handles each company's fiscal calendar, including 52/53-week years and years that end in January, June or September.
 - Fills quarters that filings don't report directly: Q4 from the annual total minus nine months, and cash-flow quarters from year-to-date totals. Each uses only the values public on that filing's date. Per-share values are never derived this way.
@@ -50,6 +50,16 @@ What each source returned when checked, and every normalization, clustering and 
 - Four modes: keyword (Postgres full text), vector (pgvector HNSW), hybrid (Reciprocal Rank Fusion of both) and rerank (hybrid reordered by a local cross-encoder), the default. Measured on 49 labeled questions in `evals/retrieval/questions.jsonl`: searching by company and period, rerank puts a correct passage in the top 10 for 94% of them (hybrid 86%) at about 1.4 seconds a search on CPU (hybrid 60 ms). Results and choices are in [docs/retrieval.md](docs/retrieval.md).
 - Indexing is incremental: only new or changed text is embedded, chunks of re-parsed or deleted documents and articles are removed, and changing the embedding model re-embeds everything. News added by polling or backfill is indexed by running `talk-is-cheap index` again.
 
+**Guidance**
+
+- Extracts management's guidance from the outlook sections of earnings releases and CFO commentaries with an LLM, through LangChain's structured output, so provider and model are configuration (default Claude Haiku 5.5). One row per statement per earnings filing: metric and the company's words, segment, GAAP or non-GAAP basis, level or growth, constant currency, target period as written and resolved, low, high, point and plus-or-minus, unit, qualitative text, conditions, and the exact quote with its character range in the filing.
+- The model only reads; code does the rest: figures ("$108.0 billion, plus or minus 2%", "74.0%, plus or minus 50 basis points", any dash style), fiscal periods ("next quarter", "Q4 FY26", "full year") on each company's calendar, grounding of every quote in the source (items whose quote is not found are dropped), conditions kept with the item they were written for, and merging of the same statement across the press release and the CFO commentary. Each issue is its own row, so raised or lowered guidance can be traced.
+- Matches each statement with the target period's result as first reported: `beat`, `met`, `missed`, `pending` or `not_comparable` with the reason (non-GAAP, segment, constant-currency, tax-rate and qualitative guidance, and per-share guidance across a stock split), with the difference and percent difference. Margins are computed from first-reported values; guidance without a stated basis is compared as GAAP and flagged.
+- Flags guided values that are implausible against the company's own prior period (revenue below half or above double, margins more than 15 points away, and similar rules per metric) for review; flagged rows keep their verdict but are left out of counts until `talk-is-cheap guidance review` marks them right or wrong. 3 of 434 comparable or pending rows are flagged, one of them a real extraction error.
+- Measured on 198 hand-labeled statements in 24 documents (`evals/guidance/labels.jsonl`): Haiku 5.5 finds 98% of numeric statements with every figure exact at $0.0015 a document; Opus 5.5 is more accurate (numeric F1 1.000) at 30 times the cost. Results in [docs/guidance.md](docs/guidance.md).
+- Spending is controlled: every response is cached, `--dry-run` estimates a run, every paid call is recorded in a ledger (`talk-is-cheap spend`), and calls that could exceed the run's cost cap or the project's total budget (`LLM_BUDGET_USD`) are refused.
+- On the current 15 companies: 1,136 rows from 135 documents; 218 beat, 103 met, 36 missed, 77 pending and 702 not comparable.
+
 **Foundation**
 
 - Python 3.12 package (`talk_is_cheap`) managed with [uv](https://docs.astral.sh/uv/).
@@ -65,6 +75,7 @@ What each source returned when checked, and every normalization, clustering and 
 - Docker with Docker Compose
 - Network access to `www.sec.gov` and `data.sec.gov` for loading filings, and to the news feeds in `feeds.yaml` and `api.gdeltproject.org` for news
 - Network access to `huggingface.co` once, for the search models (about 150 MB, kept in `MODEL_CACHE_DIR`); search and indexing then run offline
+- For guidance extraction only: an API key of the configured LLM provider (Anthropic by default) and network access to its API
 
 ## Quick start
 
@@ -102,7 +113,13 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap eval retrieval [--modes hybrid,rerank] [--filtered] [--details]` | Recall@5, recall@10, MRR and latency of each search mode, with and without the context header, on `evals/retrieval/questions.jsonl`, for all questions and for `lexical` and `paraphrase` ones. `--filtered` also filters each question by its own period or news dates. The first run embeds every chunk's text without its header too (about as long as the first `index`). |
 | `talk-is-cheap db-check` | Database connectivity, pgvector and migration status |
 
-Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar`, `ingest filings` and then `index`. `make index` indexes new filing text and news; `make eval-retrieval` runs the retrieval benchmark.
+| `talk-is-cheap extract guidance [--tickers NVDA] [--model claude-opus-5-5] [--missing-only] [--dry-run]` | Extract guidance from the outlook sections of earnings releases and CFO commentaries with the configured LLM, then refresh every verdict. One line per company: documents (up to date, reprocessed, cached, called), items, items dropped because their quote is not in the source, rows by verdict, tokens, cost; then the budget left. Incremental: documents already extracted with the same model, prompt version and text are skipped; a new post-processing version re-processes stored extractions from the cache. `--missing-only` extracts only documents never extracted, keeping those of another model. `--dry-run` prints the calls, tokens, estimated cost and budget left without calling. Calls that could exceed `LLM_COST_CAP` or `LLM_BUDGET_USD` are refused. Companies whose releases have no outlook are reported with 0 rows. |
+| `talk-is-cheap spend` | LLM spending recorded in the ledger: total against `LLM_BUDGET_USD` and what remains, by command and by model, and notes of spending from before the ledger |
+| `talk-is-cheap guidance NVDA [--metric revenue] [--flagged] [--limit 20]` | A company's guidance (`all` for every company), newest issue first: row ID, quarter issued, target period, guided figure, actual as first reported, verdict, difference; then a REVIEW flag with the rule and numbers when the guided value is implausible against the prior period, the reason a row is pending or not comparable, whether the basis was assumed GAAP, the conditions, and the source URL with its character range. Ends with counts by verdict, leaving out rows that need review or were reviewed as wrong. `--flagged`: only flagged rows. |
+| `talk-is-cheap guidance review ID --ok\|--wrong` | Record a review decision on a row: `--ok` clears its plausibility flag, `--wrong` leaves it out of verdicts. Kept by filing and statement, so it survives re-extraction and re-processing. |
+| `talk-is-cheap eval guidance [--models claude-haiku-5-5,claude-opus-5-5] [--details]` | Precision, recall and F1 (all, numeric and qualitative items), exact figures, period accuracy, conditions captured, and tokens and cost per document, on `evals/guidance/labels.jsonl`. Responses are cached, so re-running costs nothing. |
+
+Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar`, `ingest filings`, `index` and, when an LLM key is configured, `extract guidance`. `make index` indexes new filing text and news; `make extract` extracts new guidance and refreshes verdicts; `make eval-retrieval` and `make eval-guidance` run the benchmarks.
 
 ## Adding companies or history
 
@@ -209,6 +226,14 @@ All settings are environment variables. See `.env.example`.
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model for search embeddings. Changing it re-embeds everything on the next `index`. |
 | `RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | fastembed cross-encoder for `--mode rerank` |
 | `MODEL_CACHE_DIR` | `.cache/fastembed` | Where the models are downloaded |
+| `LLM_PROVIDER` | `anthropic` | LangChain chat-model integration for guidance extraction: `anthropic`, `openai` or `google_genai` (the last two need their `langchain-*` package) |
+| `LLM_MODEL` | `claude-haiku-5-5` | Model for guidance extraction, the default for cost; `--model claude-opus-5-5` is more accurate ([docs/guidance.md](docs/guidance.md)) |
+| `LLM_EFFORT` | `low` | Anthropic reasoning effort; empty for the model's default. Part of the model name in the cache and stored rows (`claude-opus-5-5@low`). |
+| `LLM_API_KEY` | unset | API key of the provider; `ANTHROPIC_API_KEY` is used when it is empty. Keep it in `.env`, never in the repository. |
+| `LLM_BUDGET_USD` | `2.50` | Hard cap on all LLM spending recorded in the ledger: a call that could take the total over it is refused, with what was spent and what remains |
+| `LLM_COST_CAP` | `10.00` | US dollars: a run stops before a call that could take its own spending over this |
+| `LLM_INPUT_PRICE`, `LLM_OUTPUT_PRICE` | unset | US dollars per million tokens, for models without a list price in `guidance/llm.py` |
+| `LLM_CACHE_DIR` | `.cache/llm` | Every model response, by model, prompt version and request hash |
 | `DATABASE_URL` | local Docker database | Must use the `postgresql+psycopg://` driver prefix |
 | `TEST_DATABASE_URL` | `talkischeap_test` on the local Docker server | Database the tests drop and recreate; the name must end in `_test`. Read from the shell only, not from `.env`. |
 | `DATABASE_ECHO` | `false` | Log every SQL statement |
@@ -233,6 +258,12 @@ All settings are environment variables. See `.env.example`.
 | `backfill_windows` | Date windows fetched from GDELT per company, so backfill can resume |
 | `chunks` | Search passages: source (`filing` or `news`), document, section or article, tickers, fiscal year and quarter (filings), publish time (news; filing date for filings), document and section type, context header, text, character range, token count, content hash of header and text, hash of the text alone, and a generated English `tsvector` with a GIN index |
 | `embeddings` | One vector per embedded text and model, keyed by model name and content hash and shared by every chunk with that text. Each model has its own partial HNSW index (cosine), so vectors of different models are never searched together. |
+| `guidance_extractions` | One per document whose outlook was extracted: model, prompt version, post-processing version, hash of the prompt, the grounded items (JSON), the items dropped and why, tokens and cost |
+| `guidance` | One row per guidance statement per earnings filing: metric (and the company's words), segment, basis, measure (level, year-over-year or sequential growth, share of revenue), constant currency, target period as written and resolved, low, high, point, plus-or-minus, unit, qualitative text, conditions, model and prompt version; and its verdict (`beat`, `met`, `missed`, `pending`, `not_comparable`) with the reason, whether the basis was assumed GAAP, the plausibility check (`passed`, `flagged`, `skipped`, its rule and numbers), the review decision, an item key that identifies the statement across rebuilds, the actual as first reported, the difference and percent difference, and the filing the actual came from |
+| `guidance_sources` | Where each statement is written: accession number, document, URL, section and character range, with the quoted text |
+| `llm_spend` | One row per paid LLM call: time, command, model, prompt version, tokens and cost, counted toward `LLM_BUDGET_USD`; and notes of earlier spending, not counted |
+| `guidance_reviews` | Review decisions (`ok`, `wrong`) by filing accession number and the statement's item key, with what was reviewed |
+| `stock_splits` | Splits from `guidance/splits.yaml`: effective date and ratio, used so per-share guidance is not compared across a split |
 
 ## Project layout
 
@@ -261,6 +292,21 @@ talk-is-cheap/
 │   │   ├── index.py         # incremental indexing, context headers, vector indexes
 │   │   ├── search.py        # filters, keyword, vector, hybrid (RRF) and rerank search
 │   │   └── evaluate.py      # retrieval benchmark: recall@k and MRR
+│   ├── spend.py             # LLM spending ledger and budget
+│   ├── guidance/
+│   │   ├── schema.py        # what the model returns: items as written
+│   │   ├── llm.py           # LangChain model, response cache, prices, cost cap
+│   │   ├── numbers.py       # "$108.0 billion, plus or minus 2%" → low, high, point, unit
+│   │   ├── periods.py       # "Q4 FY26", "next quarter", "full year" → fiscal period
+│   │   ├── grounding.py     # quotes found in the source, with character offsets
+│   │   ├── items.py         # parsed, resolved, grounded and merged items
+│   │   ├── extract.py       # documents, prompts, incremental runs, rows per filing
+│   │   ├── matching.py      # verdicts against first-reported values, splits, plausibility
+│   │   ├── evaluate.py      # extraction benchmark against labels
+│   │   ├── queries.py       # a company's guidance with sources
+│   │   ├── review.py        # review decisions on flagged rows
+│   │   └── splits.yaml      # verified stock splits
+│   ├── prompts/guidance_extraction/  # versioned prompts (v1.md)
 │   ├── filings/
 │   │   ├── html_text.py     # filing HTML → structured text
 │   │   ├── sections.py      # press release tagging, 10-Q/10-K item splitting
@@ -281,6 +327,7 @@ talk-is-cheap/
 ├── scripts/poll-news.sh     # one scheduled news poll, with log and overlap guard
 ├── alembic/                 # migrations
 ├── evals/retrieval/         # labeled questions for the retrieval benchmark
+├── evals/guidance/          # hand-labeled outlook sections for the guidance benchmark
 ├── tests/                   # unit tests; integration/ uses a real database
 │   └── fixtures/            # trimmed real SEC filings; news/ holds trimmed real feeds
 ├── docker-compose.yml
@@ -297,4 +344,4 @@ make test-unit   # only tests that need no database
 
 Integration tests never touch the database in `DATABASE_URL`. Each test run drops, recreates and migrates its own database, `talkischeap_test` on the local Docker server, so tests start from an empty database, as in CI. Set `TEST_DATABASE_URL` in the shell to use another one; its name must end in `_test`. Tests read neither `.env` nor the application's variables from the shell: they run with the defaults, and tests that need a setting set it themselves.
 
-Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; polling, backfill and the news commands run end to end against the database with mocked feeds; and chunking, indexing and search run without downloading a model, using a word-count tokenizer, a bag-of-words embedder and a word-overlap reranker (`tests/retrieval_fakes.py`). Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.
+Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; polling, backfill and the news commands run end to end against the database with mocked feeds; chunking, indexing and search run without downloading a model, using a word-count tokenizer, a bag-of-words embedder and a word-overlap reranker (`tests/retrieval_fakes.py`); and guidance extraction never calls a real model: a fake model answers from fixed items (`tests/guidance_fakes.py`), and extraction, rows per filing, verdicts, caching and the commands run end to end against the database. Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.

@@ -1,0 +1,23 @@
+# Stock splits of companies in universe.yaml, since history_start. Guidance per share
+# issued before a split is not compared with results reported after it.
+#
+# effective_date: the first trading day on a split-adjusted basis.
+# ratio:          shares after the split per share before it.
+# Each entry is checked against the split ratio the company reports in XBRL
+# (us-gaap:StockholdersEquityNoteStockSplitConversionRatio1) and its filings.
+
+splits:
+  - ticker: NVDA
+    effective_date: 2024-06-10
+    ratio: 10
+    source: >-
+      "Ten-for-one forward stock split effective June 7, 2024" (earnings release,
+      8-K 0001045810-24-000113); "On June 7, 2024, NVIDIA completed a ten-for-one
+      forward stock split" (release of 2024-08-28). XBRL split ratio 10.
+  - ticker: NFLX
+    effective_date: 2025-11-17
+    ratio: 10
+    source: >-
+      "On November 14, 2025, the Company completed a ten-for-one forward stock split"
+      (10-K filed 2026-01-23, Item 5); charter amendment 8-K 0001065280-25-000450.
+      XBRL split ratio 10.

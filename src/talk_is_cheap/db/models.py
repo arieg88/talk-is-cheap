@@ -1,5 +1,5 @@
-"""ORM models for companies, filings, financial data, filing text, news and the
-retrieval index."""
+"""ORM models for companies, filings, financial data, filing text, news, the
+retrieval index and guidance."""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -22,7 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from talk_is_cheap.db.base import Base
@@ -391,3 +391,219 @@ class Embedding(Base):
     content_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     embedding: Mapped[list[float]] = mapped_column(Vector())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StockSplit(Base):
+    """A stock split, from `guidance/splits.yaml`: on `effective_date`, the first day the
+    shares traded split-adjusted, each share became `ratio` shares."""
+
+    __tablename__ = "stock_splits"
+    __table_args__ = (
+        UniqueConstraint("cik", "effective_date", name="uq_stock_splits_split"),
+        CheckConstraint("ratio > 0", name="ratio"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik", ondelete="CASCADE"))
+    effective_date: Mapped[date] = mapped_column(Date)
+    ratio: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    source: Mapped[str] = mapped_column(Text)
+
+
+class GuidanceExtraction(Base):
+    """The guidance items extracted from one document's outlook sections by one model
+    with one prompt version: what the model returned, after parsing, period resolution
+    and grounding. One row per document, replaced when the document is extracted again.
+
+    `items` holds the grounded items, `dropped` the ones whose quote was not found in the
+    source, with the reason. Documents are identified by accession number and name, which
+    survive re-parsing; `input_hash` is the hash of the full prompt, so changed text or a
+    changed prompt is extracted again.
+    """
+
+    __tablename__ = "guidance_extractions"
+    __table_args__ = (
+        UniqueConstraint("accession_no", "document_name", name="uq_guidance_extractions_document"),
+        Index("ix_guidance_extractions_cik", "cik"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik", ondelete="CASCADE"))
+    accession_no: Mapped[str] = mapped_column(String(20))
+    document_name: Mapped[str] = mapped_column(String(255))
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str] = mapped_column(String(16))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    # guidance/items.py: PROCESSING_VERSION. A newer one re-processes the cached response.
+    processing_version: Mapped[str] = mapped_column(String(16))
+    items: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    dropped: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    input_tokens: Mapped[int] = mapped_column(Integer)
+    output_tokens: Mapped[int] = mapped_column(Integer)
+    cost: Mapped[Decimal] = mapped_column(Numeric(12, 6))  # when the response was made
+    extracted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Guidance(Base):
+    """One guidance statement as issued in one earnings filing, with its verdict.
+
+    The same statement in several documents of the filing (a press release and a CFO
+    commentary, or a text and a table) is one row with several `guidance_sources`. Each
+    filing's statements are their own rows, so guidance raised over three quarters is three
+    rows. Figures are in dollars, dollars per share or percent (74.0 is 74%); `low` and
+    `high` include plus-or-minus ranges. The verdict compares the target period's value as
+    first reported (`guidance/matching.py`).
+    """
+
+    __tablename__ = "guidance"
+    __table_args__ = (
+        CheckConstraint(
+            "metric IN ('revenue', 'gross_margin', 'operating_margin', 'operating_expenses', "
+            "'operating_income', 'eps', 'capex', 'tax_rate', 'other')",
+            name="metric",
+        ),
+        CheckConstraint("basis IN ('gaap', 'non_gaap', 'unspecified')", name="basis"),
+        CheckConstraint(
+            "measure IN ('level', 'yoy_growth', 'sequential_growth', 'share_of_revenue')",
+            name="measure",
+        ),
+        CheckConstraint("unit IN ('usd', 'pct', 'usd_per_share', 'other')", name="unit"),
+        CheckConstraint(
+            "plus_minus_kind IS NULL OR plus_minus_kind IN ('absolute', 'percent')",
+            name="plus_minus_kind",
+        ),
+        CheckConstraint(
+            "verdict IN ('beat', 'met', 'missed', 'pending', 'not_comparable')", name="verdict"
+        ),
+        CheckConstraint(
+            "target_fiscal_quarter IS NULL OR target_fiscal_quarter BETWEEN 1 AND 4",
+            name="target_fiscal_quarter",
+        ),
+        Index("ix_guidance_company_issued", "cik", "fiscal_year", "fiscal_quarter"),
+        Index("ix_guidance_accession_no", "accession_no"),
+        CheckConstraint(
+            "plausibility IS NULL OR plausibility IN ('passed', 'flagged', 'skipped')",
+            name="plausibility",
+        ),
+        CheckConstraint("review IS NULL OR review IN ('ok', 'wrong')", name="review"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik", ondelete="CASCADE"))
+    accession_no: Mapped[str] = mapped_column(String(20))  # the issuing filing
+    fiscal_year: Mapped[int] = mapped_column(SmallInteger)  # quarter the release reports
+    fiscal_quarter: Mapped[int] = mapped_column(SmallInteger)
+    issued_at: Mapped[date] = mapped_column(Date)
+    metric: Mapped[str] = mapped_column(String(32))
+    metric_raw: Mapped[str] = mapped_column(Text)
+    segment: Mapped[str | None] = mapped_column(Text)
+    basis: Mapped[str] = mapped_column(String(16))
+    measure: Mapped[str] = mapped_column(String(24))
+    constant_currency: Mapped[bool] = mapped_column(Boolean)
+    period_text: Mapped[str] = mapped_column(Text)
+    target_fiscal_year: Mapped[int | None] = mapped_column(SmallInteger)
+    target_fiscal_quarter: Mapped[int | None] = mapped_column(SmallInteger)  # None: full year
+    low: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    high: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    point: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    plus_minus: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    plus_minus_kind: Mapped[str | None] = mapped_column(String(16))
+    unit: Mapped[str] = mapped_column(String(16))
+    value_text: Mapped[str | None] = mapped_column(Text)
+    qualitative: Mapped[str | None] = mapped_column(Text)
+    conditions: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str] = mapped_column(String(16))
+    verdict: Mapped[str] = mapped_column(String(16))
+    # Why the verdict is not_comparable or pending.
+    verdict_reason: Mapped[str | None] = mapped_column(Text)
+    # Guidance without a GAAP or non-GAAP label, compared with the GAAP actual.
+    basis_assumed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The guided value against the prior period's actual (matching.check_plausibility):
+    # "passed", "flagged" (needs review) or "skipped"; None when not comparable. The rule
+    # applied and the numbers, or why it was skipped.
+    plausibility: Mapped[str | None] = mapped_column(String(16))
+    plausibility_rule: Mapped[str | None] = mapped_column(String(32))
+    plausibility_note: Mapped[str | None] = mapped_column(Text)
+    # A reviewer's decision from `guidance_reviews`: "ok" clears the flag, "wrong" leaves
+    # the row out of verdicts.
+    review: Mapped[str | None] = mapped_column(String(8))
+    # Hash of what makes the statement (items.GuidanceItem.key): the same statement has
+    # the same key when its filing is rebuilt, so review decisions survive.
+    item_key: Mapped[str] = mapped_column(String(64))
+    actual: Mapped[Decimal | None] = mapped_column(AMOUNT)  # in the guidance's unit
+    # actual minus the guided reference (point, else range midpoint, else the bound), and
+    # that difference as a percentage of the reference.
+    difference: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    percent_difference: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    actual_accession_no: Mapped[str | None] = mapped_column(String(20))
+    actual_filed: Mapped[date | None] = mapped_column(Date)
+    matched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GuidanceReview(Base):
+    """A reviewer's decision on a guidance statement, keyed by its filing and item key
+    rather than its row, so it survives rebuilding the filing's rows."""
+
+    __tablename__ = "guidance_reviews"
+    __table_args__ = (
+        UniqueConstraint("accession_no", "item_key", name="uq_guidance_reviews_item"),
+        CheckConstraint("decision IN ('ok', 'wrong')", name="decision"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik", ondelete="CASCADE"))
+    accession_no: Mapped[str] = mapped_column(String(20))
+    item_key: Mapped[str] = mapped_column(String(64))
+    decision: Mapped[str] = mapped_column(String(8))
+    # What was reviewed, for the record: metric, period, guided value, flag.
+    summary: Mapped[str] = mapped_column(Text)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GuidanceSource(Base):
+    """Where a guidance statement is written: `quote` is `documents.text[char_start:
+    char_end]` of the document named by accession number and document name."""
+
+    __tablename__ = "guidance_sources"
+
+    guidance_id: Mapped[int] = mapped_column(
+        ForeignKey("guidance.id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    accession_no: Mapped[str] = mapped_column(String(20))
+    document_name: Mapped[str] = mapped_column(String(255))
+    doc_type: Mapped[str] = mapped_column(String(32))
+    url: Mapped[str] = mapped_column(String(512))
+    section_title: Mapped[str] = mapped_column(Text)
+    char_start: Mapped[int] = mapped_column(Integer)
+    char_end: Mapped[int] = mapped_column(Integer)
+    quote: Mapped[str] = mapped_column(Text)
+
+
+class LlmSpend(Base):
+    """One paid LLM call, or a note of spending from before the ledger.
+
+    Every call that reaches a provider is recorded with its model, tokens and cost,
+    including calls whose answer could not be used. Cached responses cost nothing and are
+    not recorded. `counted` rows count toward LLM_BUDGET_USD; notes (`counted` false)
+    record earlier spending without counting it.
+    """
+
+    __tablename__ = "llm_spend"
+    __table_args__ = (Index("ix_llm_spend_recorded_at", "recorded_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    command: Mapped[str] = mapped_column(String(64))  # "extract guidance", "eval guidance"
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str | None] = mapped_column(String(16))
+    input_tokens: Mapped[int] = mapped_column(Integer)
+    output_tokens: Mapped[int] = mapped_column(Integer)
+    cost: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    counted: Mapped[bool] = mapped_column(Boolean)
+    note: Mapped[str | None] = mapped_column(Text)
