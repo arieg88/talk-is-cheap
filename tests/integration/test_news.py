@@ -28,21 +28,27 @@ from talk_is_cheap.db.models import (
 )
 from talk_is_cheap.edgar.ingest import ingest_edgar
 from talk_is_cheap.filings.ingest import ingest_filings
+from talk_is_cheap.news import locks
 from talk_is_cheap.news.adapters import FeedEntry, build_feeds, feed_links
 from talk_is_cheap.news.gdelt import (
     API_URL,
     MAX_FAILURES,
     MAX_RECORDS,
+    SECONDS_PER_ANSWER,
+    BackfillProgress,
     GdeltBackfill,
     Pacer,
     backfill,
+    earnings_windows,
+    estimate,
+    plan_backfill,
+    weekly_windows,
 )
 from talk_is_cheap.news.linking import CompanyMatcher
-from talk_is_cheap.news.locks import POLL_LOCK, advisory_locks
 from talk_is_cheap.news.poll import poll_feeds
 from talk_is_cheap.news.queries import backfill_progress, company_news, feed_health
 from talk_is_cheap.news.store import reprocess
-from talk_is_cheap.universe import Universe
+from talk_is_cheap.universe import Universe, UniverseCompany
 from tests.integration.test_ingest import CIK, FakeSource
 from tests.integration.test_ingest import UNIVERSE as EDGAR_UNIVERSE
 
@@ -368,41 +374,55 @@ def gdelt_answer(count: int, start: datetime, prefix: str) -> str:
     return json.dumps({"articles": articles})
 
 
-async def test_backfill_splits_full_windows_and_resumes(
+async def run_weeks(
+    sessions: async_sessionmaker[AsyncSession],
+    source: GdeltBackfill,
+    companies: list[UniverseCompany],
+    client: httpx.AsyncClient,
+    since: datetime,
+    until: datetime,
+) -> list[BackfillProgress]:
+    windows = [(c, s, e) for c in companies for s, e in weekly_windows(since, until)]
+    planned = await plan_backfill(sessions, source, windows)
+    return await backfill(sessions, source, planned, MATCHER, client)
+
+
+async def test_full_answers_escalate_to_publishers_then_halves_and_runs_resume(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     since = datetime(2025, 1, 6, tzinfo=UTC)
     until = since + timedelta(days=14)
     source = GdeltBackfill(["reuters.com"], pacer=Pacer(interval=0))
     ticonium = UNIVERSE.select_news(["TICN"])
-    answers: list[tuple[str, str]] = []
+    answers: list[tuple[str, str, str]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         start = request.url.params["startdatetime"]
         end = request.url.params["enddatetime"]
-        answers.append((start, end))
-        if start == "20250106000000" and end == "20250113000000":
-            # The first week is full: it must be split in half.
-            return httpx.Response(200, text=gdelt_answer(MAX_RECORDS, since, "full"))
+        kind = "domains" if "domainis:" in request.url.params["query"] else "name"
+        answers.append((kind, start, end))
+        moment = datetime.strptime(start, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
         if start.startswith("20250113"):
             return httpx.Response(404, text="not found")
-        moment = datetime.strptime(start, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+        if end == "20250113000000" and start == "20250106000000":
+            # Both the name search and the publisher search fill the record limit.
+            return httpx.Response(200, text=gdelt_answer(MAX_RECORDS, moment, kind))
         return httpx.Response(200, text=gdelt_answer(3, moment, start))
 
     with respx.mock(assert_all_called=False) as router:
         router.get(API_URL).mock(side_effect=respond)
         async with httpx.AsyncClient() as client:
-            (first,) = await backfill(
-                sessions, source, ticonium, MATCHER, client, since=since, until=until
-            )
+            (first,) = await run_weeks(sessions, source, ticonium, client, since, until)
     assert answers == [
-        ("20250106000000", "20250113000000"),
-        ("20250106000000", "20250109120000"),
-        ("20250109120000", "20250113000000"),
-        ("20250113000000", "20250120000000"),
+        ("name", "20250106000000", "20250113000000"),  # full: kept, then by publisher
+        ("domains", "20250106000000", "20250113000000"),  # still full: halved
+        ("domains", "20250106000000", "20250109120000"),
+        ("domains", "20250109120000", "20250113000000"),
+        ("name", "20250113000000", "20250120000000"),
     ]
     assert first.error is not None and "HTTP 404" in first.error
-    assert (first.windows_done, first.windows_total, first.new_articles) == (1, 2, 6)
+    assert (first.windows_done, first.windows_total) == (1, 2)
+    assert first.new_articles == 2 * MAX_RECORDS + 6  # the full answers are kept too
 
     async with sessions() as session:
         mine = (
@@ -421,28 +441,38 @@ async def test_backfill_splits_full_windows_and_resumes(
             .scalars()
             .first()
         )
-    assert [(w.window_start, w.requests, w.new_articles) for w in mine] == [(since, 3, 6)]
+    assert [(w.window_start, w.requests) for w in mine] == [(since, 4)]
     assert article is not None and article.time_precision == "seen"
     assert article.title.endswith("(update).")
     assert await links(sessions, article.url.removeprefix(NEWS)) == {"TICN": ("headline", 1.0)}
 
-    # The re-run fetches only the week that failed; a third run fetches nothing.
-    answers.clear()
+    # The re-run fetches only the week that failed; a third run has nothing to fetch.
     with respx.mock(assert_all_called=False) as router:
         router.get(API_URL).mock(
             side_effect=lambda r: httpx.Response(200, text=gdelt_answer(2, since, "again"))
         )
         async with httpx.AsyncClient() as client:
-            (second,) = await backfill(
-                sessions, source, ticonium, MATCHER, client, since=since, until=until
-            )
-            assert second.error is None and second.windows_done == 2
-            assert second.requests == 1
-            (third,) = await backfill(
-                sessions, source, ticonium, MATCHER, client, since=since, until=until
-            )
+            (second,) = await run_weeks(sessions, source, ticonium, client, since, until)
+            assert (second.error, second.windows_done, second.requests) == (None, 1, 1)
+            assert await run_weeks(sessions, source, ticonium, client, since, until) == []
         assert router.calls.call_count == 1
-    assert third.requests == 0 and third.windows_done == 2
+
+
+async def test_flagged_companies_search_publishers_from_the_start(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    since = datetime(2025, 1, 6, tzinfo=UTC)
+    flagged = [UniverseCompany(ticker="TICN", name="Ticonium", gdelt_filter_publishers=True)]
+    source = GdeltBackfill(["reuters.com", "cnbc.com"], pacer=Pacer(interval=0))
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get(API_URL).mock(return_value=httpx.Response(200, text=""))
+        async with httpx.AsyncClient() as client:
+            (result,) = await run_weeks(
+                sessions, source, flagged, client, since, since + timedelta(days=7)
+            )
+        (call,) = route.calls
+    assert result.requests == 1
+    assert "(domainis:reuters.com OR domainis:cnbc.com)" in call.request.url.params["query"]
 
 
 async def test_a_window_that_keeps_failing_is_skipped_and_the_run_goes_on(
@@ -467,14 +497,8 @@ async def test_a_window_that_keeps_failing_is_skipped_and_the_run_goes_on(
     with respx.mock(assert_all_called=False) as router:
         router.get(API_URL).mock(side_effect=respond)
         async with httpx.AsyncClient() as client:
-            tica, ticn = await backfill(
-                sessions,
-                source,
-                UNIVERSE.select_news(),
-                MATCHER,
-                client,
-                since=since,
-                until=since + timedelta(days=14),
+            tica, ticn = await run_weeks(
+                sessions, source, UNIVERSE.select_news(), client, since, since + timedelta(days=14)
             )
         assert router.calls.call_count == MAX_FAILURES + 1 + 2
     assert (tica.skipped, tica.windows_done, tica.error) == (1, 1, None)
@@ -488,12 +512,69 @@ async def test_a_window_that_keeps_failing_is_skipped_and_the_run_goes_on(
     assert sources["gdelt:TICA"].windows == 1
 
 
+async def test_earnings_windows_come_from_stored_releases(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sessions() as session, session.begin():
+        await session.execute(delete(Company).where(Company.cik == CIK))
+    await ingest_edgar(FakeSource(), sessions, EDGAR_UNIVERSE)
+    await ingest_filings(FakeSource(), sessions, EDGAR_UNIVERSE)
+    source = GdeltBackfill(["reuters.com"], pacer=Pacer(interval=0))
+    try:
+        async with sessions() as session:
+            # The fake company files one earnings release (2025-04-24) and a deliveries
+            # report under item 2.02 (2025-07-02), which is not a release.
+            windows = await earnings_windows(
+                session, UNIVERSE.select_news(), days_before=1, days_after=3
+            )
+        assert [(c.ticker, s, e) for c, s, e in windows] == [
+            ("TICA", datetime(2025, 4, 23, tzinfo=UTC), datetime(2025, 4, 28, tzinfo=UTC))
+        ]
+        planned = await plan_backfill(sessions, source, windows)
+        assert [(w.start, w.end) for w in planned] == [(windows[0][1], windows[0][2])]
+
+        # Cut where RSS polling began, dropped when it began before the window.
+        cut = await plan_backfill(
+            sessions, source, windows, not_after=datetime(2025, 4, 25, tzinfo=UTC)
+        )
+        assert cut[0].end == datetime(2025, 4, 25, tzinfo=UTC)
+        assert await plan_backfill(sessions, source, windows, not_after=windows[0][1]) == []
+
+        # Dropped when recorded windows (here a weekly one) cover it.
+        async with sessions() as session, session.begin():
+            feed_id = await session.scalar(select(Feed.id).where(Feed.key == "gdelt:TICA"))
+            await session.execute(
+                insert(BackfillWindow).values(
+                    feed_id=feed_id,
+                    window_start=datetime(2025, 4, 21, tzinfo=UTC),
+                    window_end=datetime(2025, 4, 28, tzinfo=UTC),
+                    requests=1,
+                    items=0,
+                    new_articles=0,
+                    truncated=False,
+                )
+            )
+        assert await plan_backfill(sessions, source, windows) == []
+        requests, duration = estimate(source, planned)
+        assert requests == 1 and duration.total_seconds() == SECONDS_PER_ANSWER
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(delete(Company).where(Company.cik == CIK))
+
+
 @pytest.fixture
 def news_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     universe = tmp_path / "universe.yaml"
     universe.write_text(json.dumps(UNIVERSE.model_dump(mode="json")))
     feeds = tmp_path / "feeds.yaml"
-    feeds.write_text(json.dumps({"feeds": [e.model_dump(exclude_unset=True) for e in ENTRIES]}))
+    feeds.write_text(
+        json.dumps(
+            {
+                "feeds": [e.model_dump(exclude_unset=True) for e in ENTRIES],
+                "backfill": [{"type": "gdelt", "companies": "all", "domains": ["reuters.com"]}],
+            }
+        )
+    )
     monkeypatch.setenv("UNIVERSE_FILE", str(universe))
     monkeypatch.setenv("FEEDS_FILE", str(feeds))
     get_settings.cache_clear()
@@ -501,7 +582,16 @@ def news_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Non
     get_settings.cache_clear()
 
 
+@pytest.fixture
+def private_locks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lock keys of the test's own, so a real poll or backfill running against the same
+    database neither blocks the test nor is blocked by it."""
+    monkeypatch.setattr(locks, "POLL_LOCK", locks.POLL_LOCK + 1000)
+    monkeypatch.setattr(locks, "BACKFILL_LOCK", locks.BACKFILL_LOCK + 1000)
+
+
 async def test_cli_ingest_feeds_and_news(
+    private_locks: None,
     engine: AsyncEngine,
     sessions: async_sessionmaker[AsyncSession],
     feeds_mock: respx.MockRouter,
@@ -536,7 +626,7 @@ async def test_cli_ingest_feeds_and_news(
         assert capsys.readouterr().out.startswith("SOURCE")
 
         # A poll that starts while another holds the lock exits quietly.
-        async with advisory_locks(engine, POLL_LOCK) as locked:
+        async with locks.advisory_locks(engine, locks.POLL_LOCK) as locked:
             assert locked
             assert await asyncio.to_thread(run, "ingest", "news") == 0
         assert capsys.readouterr().out == "another news poll is still running; skipped\n"
@@ -555,6 +645,16 @@ async def test_cli_ingest_feeds_and_news(
         out = capsys.readouterr().out
         assert "TICA FY2025Q1: earnings release filed 2025-04-24 00:00Z" in out
         assert "Ticacorp beats estimates as cloud sales jump  (+1: Test Wire)" in out
+
+        with respx.mock(assert_all_called=False) as gdelt:
+            gdelt.get(API_URL).mock(return_value=httpx.Response(200, text=""))
+            args = ("ingest", "news", "--backfill", "--around-earnings", "--tickers", "TICA")
+            assert await asyncio.to_thread(run, *args) == 0
+            out = capsys.readouterr().out
+            assert "1 earnings windows to fetch (0 already fetched" in out
+            assert "attempt 1: 0 articles in" in out
+            assert await asyncio.to_thread(run, *args) == 0
+            assert "0 earnings windows to fetch (1 already fetched" in capsys.readouterr().out
 
         assert await asyncio.to_thread(run, "news", "TICA", "--around-earnings", "FY2024Q1") == 1
         assert "no earnings release loaded" in capsys.readouterr().err

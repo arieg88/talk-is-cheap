@@ -83,7 +83,8 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap financials NVDA [--vintage first\|latest] [--quarters 8]` | Quarterly revenue, margins, net income, EPS, operating cash flow and capex. Derived quarters are marked `*`. |
 | `talk-is-cheap restatements NVDA` | Quarterly values that changed after they were first reported |
 | `talk-is-cheap ingest news [--tickers NVDA,AMD]` | One poll of every feed in `feeds.yaml`, one summary line per feed: items, new articles, how many joined an existing story, duplicates and spam dropped, or `not modified`. With `--tickers`, only those companies' feeds. Exits quietly if another poll is still running. |
-| `talk-is-cheap ingest news --backfill --since 2024-01-01 [--until 2024-07-01] [--tickers NVDA]` | Past news from GDELT, one timestamped progress line per week with an estimate of the time left. Safe to stop at any point; re-running resumes. A week that fails 30 times in a row is skipped for the next run. See "Long backfills" below. |
+| `talk-is-cheap ingest news --backfill --around-earnings [--days-before 1] [--days-after 3] [--tickers NVDA]` | Past news from GDELT for the days around each stored earnings release, newest first (recommended). Prints the number of windows and an estimate first, then every request and one line per window. Safe to stop at any point; re-running resumes. See "Long backfills" below. |
+| `talk-is-cheap ingest news --backfill --since 2024-01-01 [--until 2024-07-01] [--tickers NVDA]` | The same for every week from a start date |
 | `talk-is-cheap ingest news --reprocess` | Apply the current rules and `universe.yaml` to every stored article: delete spam, clean titles, rebuild near-duplicate clusters and company links. Run it after editing names, aliases or excluded phrases. |
 | `talk-is-cheap feeds [--backfill]` | Health of the polled feeds: status, last success, last new item, consecutive failures, articles, last error. With `--backfill`, the backfill sources instead: weeks fetched, the range they cover, articles and errors. |
 | `talk-is-cheap news NVDA [--since 2026-10-01] [--around-earnings FY2027Q2] [--min-confidence 0.5] [--limit 50]` | A company's news, newest first, one line per story with time (UTC), publisher and headline, and the other publishers of the same story. `--around-earnings` shows the 48 hours after that quarter's earnings release was filed (needs `ingest edgar` and `ingest filings`). Times marked `~` are when GDELT saw the article, not its publish time. |
@@ -110,15 +111,19 @@ RSS feeds only carry recent items and their history cannot be fetched later, so 
 
 ## Long backfills
 
-As of 2026-10-19 the GDELT API is overloaded: it refuses most requests intermittently (from every network tested) and every answer takes about 10 seconds. A refused request is retried 10 seconds later, never more than one request per 5 seconds, and a week that fails 30 times in a row is skipped and left for the next run. A full backfill takes days, so run it unattended with a log:
+RSS feeds only carry news from the day polling starts; GDELT fills in the past. As of 2026-10-19 the GDELT API is overloaded: it refuses most requests intermittently (from every network tested), every answer takes about 10 seconds, and a refused request is retried 10 seconds later, never more than one request per 5 seconds. A week that fails 30 times in a row is skipped and left for the next run.
+
+Recommended: backfill only the days around each earnings release (one day before through three days after the filing date, newest quarters first), the news the analysis compares with filings. Run it unattended with a log:
 
 ```bash
-nohup uv run talk-is-cheap ingest news --backfill --since 2024-01-01 >> .cache/backfill.log 2>&1 &
-tail -f .cache/backfill.log          # every request with its response time, one line per week
-talk-is-cheap feeds --backfill       # weeks fetched, first and last week, per company
+nohup uv run talk-is-cheap ingest news --backfill --around-earnings >> .cache/backfill.log 2>&1 &
+tail -f .cache/backfill.log          # every request with its response time, one line per window
+talk-is-cheap feeds --backfill       # windows fetched, first and last, per company
 ```
 
-Stopping is safe at any point: press Ctrl+C, or `kill` the process (`pkill -f "ingest news --backfill"`). It prints a one-line summary (weeks fetched, average time per week, new articles), keeps every finished week and every article already stored, and running the same command again resumes with the first unfinished or skipped week. Only one backfill runs at a time; scheduled polls keep running alongside it.
+It first prints how many windows are left and an estimate: for all 15 companies since 2024, 165 windows and 10 to 18 hours (measured 2026-10-19). `--since 2024-01-01` backfills every week instead, which takes weeks for the busiest companies. Load filings first (`make ingest`); earnings windows come from the stored press releases.
+
+Stopping is safe at any point: press Ctrl+C, or `kill` the process (`pkill -f "ingest news --backfill"`). It prints a one-line summary (windows fetched, average time per window, new articles), keeps every finished window and every article already stored, and running the same command again resumes with the first unfinished or skipped window. Only one backfill runs at a time; scheduled polls keep running alongside it.
 
 ## Scheduled news polling
 

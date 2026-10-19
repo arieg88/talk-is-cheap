@@ -87,19 +87,26 @@ reach Google News, where the publisher rule (section 5) links them.
 - **How far back:** articles from January 2024 are returned (a backfill of the week of
   2024-01-01 for Nvidia stored them), so the full `history_start` range is searchable.
   Whether the archive reaches GDELT's announced January 2017 start was not tested.
-- **One query per company and week:** the query names the company (name and aliases)
-  in English and nothing else. A query listing all 28 configured publisher domains (743
-  characters) was answered "Your query was too short or too long", so publishers are
-  filtered locally after fetching, against `backfill` domains in `feeds.yaml`.
-- **Record limit:** 250 articles per query, counted before local filtering. A part that
-  comes back full is split in half and both halves are queried, down to 30 minutes
-  (`MIN_WINDOW`, GDELT dates have 15-minute resolution), so filtering never hides lost
-  articles; a 30-minute part that is still full is recorded as truncated and counted by
-  `feeds --backfill`. Measured on 2026-10-19, a week took one query for Cisco (March
-  2024), Qualcomm (August 2026) and Salesforce (November 2024), 7 for Adobe (January
-  2024), 13 for Nvidia (January 2024) and about 90 for Apple (June 2026): GDELT's search
-  ignores case, so "Apple" and "Adobe" also match the fruit and the building material.
-  Splitting the domain list into groups instead took 4 queries for every company-week.
+- **Queries:** GDELT returns at most 250 articles per query (counted before local
+  filtering) and answered "Your query was too short or too long" to one query naming all
+  28 configured publisher domains (743 characters); queries of about 100 characters were
+  answered. So the domains are sent in batches of at most 250 characters
+  (`MAX_QUERY_CHARS`), four batches with the current list.
+  - Companies flagged `gdelt_filter_publishers: true` in `universe.yaml` (Apple,
+    Amazon, Alphabet, Meta, Tesla, Intel, Oracle, Adobe: names that are common words or
+    heavily covered) are always searched with the domain batches: GDELT's search ignores
+    case, so "Apple" or "Adobe" alone also returns the fruit and the building material.
+  - Any other company is searched by name alone first, with publishers filtered
+    locally: one request when the window is quiet. When that answer holds 250 articles,
+    they are kept and the same window is searched again with the domain batches instead
+    of being halved.
+  - Only a domain-batch answer that still holds 250 articles is split in half, down to
+    30 minutes (`MIN_WINDOW`, GDELT dates have 15-minute resolution); a part still full
+    there is recorded as truncated and counted by `feeds --backfill`.
+- **Connections:** the request right after each answer used to fail in 0.1 seconds with
+  "Server disconnected without sending a response" (7 times in one 30-minute log): GDELT
+  closes idle connections without saying so. Every request now asks for a new
+  connection (`Connection: close`).
 - **Dates:** `seendate` is when GDELT's crawler saw the article, not when it was
   published; such articles have `time_precision = 'seen'` and are marked `~` by
   `talk-is-cheap news`.
@@ -122,15 +129,23 @@ reach Google News, where the publisher rule (section 5) links them.
   is skipped and left unrecorded, the run says the GDELT API kept refusing requests,
   and it moves on; running the same command again fetches the skipped windows. Every
   attempt is printed with its outcome and response time.
-- **Speed:** measured on 2026-10-19 over five full weeks (Nvidia and Adobe January 2024,
-  Cisco March 2024, Salesforce November 2024, Qualcomm August 2026): 113 attempts for 23
-  answered requests (about one in five answered), 10-17 seconds per answer, and 1.0,
-  1.6, 2.2, 8.1 and 24 minutes per week, 7.4 minutes on average. At that average the
-  15 companies since 2024-01-01 (about 2,190 weeks) take about 270 hours, 11 days of
-  continuous running. Apple is far slower (29 minutes covered 16 hours of one week, about
-  5 hours a week extrapolated), so the companies whose names are common words (Apple,
-  Amazon, Meta, Oracle) and the most covered ones (Nvidia, Microsoft, Alphabet, Tesla)
-  can take weeks on their own.
+- **Speed:** measured on 2026-10-19 (each answer 10-21 seconds, about one request in
+  four answered):
+
+  | Window | Queries | Requests | Minutes | Articles kept |
+  | --- | --- | --- | --- | --- |
+  | Nvidia, week of 2024-01-08, name only then halving | before | 13 | 24.0 | 236 |
+  | Nvidia, week of 2024-01-08, name then publisher batches | after | 5 | 8.2 | 268 |
+  | Apple, week of 2026-06-01, name only then halving | before | 9+ | 29 for 16 of 168 hours | 21 |
+  | Apple, week of 2026-06-01, publisher batches | after | 4 | 4.2 | 221 |
+  | Nvidia earnings, 2024-05-21 to 05-26 | after | 5 | 7.4 | 371 |
+  | Apple earnings, 2026-07-29 to 08-03 | after | 4 | 3.0 | 199 |
+
+  Quiet companies take one request (Cisco, Qualcomm, Salesforce: 1.0-2.2 minutes a
+  week). The earnings-window backfill of all 15 companies (165 windows since 2024) needs
+  424 to about 730 requests, 10 to 18 hours of unattended running at 87 seconds per
+  answered request (`SECONDS_PER_ANSWER`). A weekly backfill since 2024-01-01 is about
+  2,190 windows, roughly ten times as many.
 
 ## 3. Normalization
 
@@ -227,19 +242,32 @@ and last of them (with any gaps between), articles, weeks still over the record 
 
 ## 7. Backfill
 
-`talk-is-cheap ingest news --backfill --since 2024-01-01 [--until ...] [--tickers ...]`
-searches GDELT for each company's names in English, one week at a time, keeping articles
-from the publisher domains listed under `backfill` in `feeds.yaml` (`news/gdelt.py`).
-Each answered part is stored at once, through the same normalization, deduplication and
-linking as feed items. A week is recorded in `backfill_windows` when all of it is
-stored; a re-run skips recorded weeks. Weeks that ended less than a day ago are fetched
-but not recorded, since GDELT is still adding to them.
+Two kinds of window (`news/gdelt.py`):
+
+- `talk-is-cheap ingest news --backfill --around-earnings [--days-before 1]
+  [--days-after 3] [--tickers ...]` (recommended): a window around each earnings press
+  release stored by `ingest filings` (deliveries reports are not releases), from the
+  day before the filing date through three days after it, newest quarters first across
+  all companies. Windows are cut where RSS polling began (the first successful poll,
+  2026-10-18), since later news comes from the feeds, and dropped when windows already
+  fetched cover them. Companies whose filings are not loaded have no windows.
+- `talk-is-cheap ingest news --backfill --since 2024-01-01 [--until ...] [--tickers ...]`:
+  every week from a start date, company by company.
+
+Before fetching, the command prints how many windows are left, how many were already
+fetched or covered by RSS polling, the fewest requests they need and how long that takes
+at the measured pace; busy windows take more. Articles are kept from the publisher domains
+listed under `backfill` in `feeds.yaml`, and each answered part is stored at once,
+through the same normalization, deduplication and linking as feed items. A window is
+recorded in `backfill_windows` when all of it is stored; a re-run skips recorded windows.
+Windows that ended less than a day ago are fetched but not recorded, since GDELT is still
+adding to them.
 
 The run prints every request (part, attempt number, outcome, response time) and one
-timestamped line per week (weeks done, new articles, requests, time left), so it can run unattended with output appended to a log
-(README, "Long backfills"). It is safe to stop at any point: Ctrl+C or `kill` (SIGTERM)
-prints a summary of the run (weeks fetched, average time per week, new articles), and
-loses at most the week in progress, whose stored articles are kept and found again as
-duplicates on the next run. A window that fails 30 times in a row is skipped and fetched
-by the next run (section 2); a company whose window fails with another error stops
-there and the next company starts.
+timestamped line per window (windows done, new articles, requests, time left), so it can
+run unattended with output appended to a log (README, "Long backfills"). It is safe to
+stop at any point: Ctrl+C or `kill` (SIGTERM) prints a summary of the run (windows
+fetched, average time per window, new articles), and loses at most the window in
+progress, whose stored articles are kept and found again as duplicates on the next run.
+A window that fails 30 times in a row is skipped and fetched by the next run (section
+2); a company whose window fails with another error gets no further windows in that run.

@@ -9,6 +9,10 @@
 #   news_only: true  collect news without loading filings yet. RSS history cannot be
 #                    backfilled later, so list a company here before its filings are
 #                    needed; remove the flag to load its filings.
+#   gdelt_filter_publishers: true
+#                    GDELT backfill searches only the publishers in feeds.yaml. Set for
+#                    names that are common words or heavily covered, whose unfiltered
+#                    searches return mostly articles that are dropped (docs/news.md).
 # Names and aliases match with their own capitalization, Title Case or UPPER CASE, as
 # whole words; a lower-case "apple" or "meta" is never a match.
 
@@ -26,6 +30,7 @@ forms:
 companies:
   - ticker: AAPL
     name: Apple
+    gdelt_filter_publishers: true
     exclude_phrases: [Big Apple, Apple pie, Apple cider, Apple orchard, Apple Valley,
                       Apple Hospitality, Apple Bank, Candy Apple, Adam's Apple, Apple picking,
                       Apple festival]
@@ -35,33 +40,40 @@ companies:
     name: Nvidia
   - ticker: AMZN
     name: Amazon
+    gdelt_filter_publishers: true
     exclude_phrases: [Amazon rainforest, Amazon River, Amazon basin, Amazon jungle,
                       Amazon region, Brazilian Amazon, Amazonian]
   - ticker: GOOGL
     name: Alphabet
+    gdelt_filter_publishers: true
     aliases: [Google]
     # Boilerplate that Google News scrapes into some titles
     exclude_phrases: [Add Us On Google, preferred source on Google]
   - ticker: META
     name: Meta
+    gdelt_filter_publishers: true
     aliases: [Meta Platforms, Facebook]
     exclude_phrases: [Meta-analysis, Meta-analyses, Meta-review, Meta-data, Meta-model,
                       Meta-models, Meta-learning, Meta-study]
   - ticker: TSLA
     name: Tesla
+    gdelt_filter_publishers: true
     exclude_phrases: [Nikola Tesla, Tesla coil]
   - ticker: AMD
     name: AMD
     aliases: [Advanced Micro Devices]
   - ticker: INTC
     name: Intel
+    gdelt_filter_publishers: true
   - ticker: CRM
     name: Salesforce
   - ticker: ORCL
     name: Oracle
+    gdelt_filter_publishers: true
     exclude_phrases: [Oracle of Omaha]
   - ticker: ADBE
     name: Adobe
+    gdelt_filter_publishers: true
   - ticker: NFLX
     name: Netflix
   - ticker: CSCO

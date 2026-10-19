@@ -1,5 +1,6 @@
 import itertools
 import json
+import re
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -10,6 +11,7 @@ from talk_is_cheap.news.adapters import FeedError
 from talk_is_cheap.news.gdelt import (
     API_URL,
     MAX_FAILURES,
+    MAX_QUERY_CHARS,
     MAX_RECORDS,
     MIN_INTERVAL,
     RETRY_PAUSE,
@@ -19,7 +21,7 @@ from talk_is_cheap.news.gdelt import (
     GdeltBackfill,
     GdeltGaveUp,
     clean_gdelt_title,
-    windows,
+    weekly_windows,
 )
 from talk_is_cheap.news.records import TimePrecision
 from talk_is_cheap.universe import UniverseCompany
@@ -46,11 +48,35 @@ def answer(*articles: dict[str, str]) -> str:
     return json.dumps({"articles": list(articles)})
 
 
-def test_query_names_the_company_in_english_without_publishers() -> None:
-    """One query per company-week; publishers are filtered after fetching."""
+def test_query_names_the_company_in_english() -> None:
     source = GdeltBackfill(["reuters.com", "www.cnbc.com"])
     assert source.query(GOOGLE) == '("Alphabet" OR "Google") sourcelang:english'
     assert source.query(NVIDIA) == '"Nvidia" sourcelang:english'
+    assert source.domain_queries(NVIDIA) == [
+        '"Nvidia" (domainis:reuters.com OR domainis:cnbc.com) sourcelang:english'
+    ]
+    assert GdeltBackfill(["reuters.com"]).domain_queries(NVIDIA) == [
+        '"Nvidia" domainis:reuters.com sourcelang:english'
+    ]
+    assert GdeltBackfill([]).domain_queries(NVIDIA) == []
+
+
+def test_domain_batches_keep_queries_short() -> None:
+    """GDELT rejected one query naming all 28 configured domains as too long."""
+    domains = [f"publisher{n}.com" for n in range(28)]
+    queries = GdeltBackfill(domains).domain_queries(GOOGLE)
+    assert len(queries) > 1
+    assert all(len(q) <= MAX_QUERY_CHARS for q in queries)
+    assert [d for q in queries for d in re.findall(r"domainis:(\S+?)[ )]", q)] == domains
+
+
+def test_flagged_companies_start_with_the_domain_batches() -> None:
+    source = GdeltBackfill([f"publisher{n}.com" for n in range(28)])
+    apple = UniverseCompany(ticker="AAPL", name="Apple", gdelt_filter_publishers=True)
+    assert source.first_queries(NVIDIA) == [(source.query(NVIDIA), False)]
+    assert source.first_queries(apple) == [(q, True) for q in source.domain_queries(apple)]
+    # Without configured publishers there is nothing to filter by.
+    assert GdeltBackfill([]).first_queries(apple) == [('"Apple" sourcelang:english', False)]
 
 
 def test_parse_keeps_wanted_domains_and_marks_seen_time() -> None:
@@ -87,10 +113,10 @@ def test_gdelt_titles_lose_spaces_around_punctuation() -> None:
 def test_windows_cover_the_range_in_weeks() -> None:
     start = datetime(2024, 1, 1, tzinfo=UTC)
     end = start + 2 * WINDOW + timedelta(days=3)
-    found = windows(start, end)
+    found = weekly_windows(start, end)
     assert [w[0] for w in found] == [start, start + WINDOW, start + 2 * WINDOW]
     assert found[-1][1] == end
-    assert windows(end, start) == []
+    assert weekly_windows(end, start) == []
 
 
 class FakeClock:
@@ -133,7 +159,10 @@ async def test_fetch_window_reports_a_full_answer(clock: FakeClock) -> None:
     )
     items, full = await fetch(GdeltBackfill(["reuters.com"]), clock)
     assert full and len(items) == MAX_RECORDS == 250
-    params = route.calls.last.request.url.params
+    request = route.calls.last.request
+    # A new connection per request: GDELT closes idle connections without saying so.
+    assert request.headers["Connection"] == "close"
+    params = request.url.params
     assert params["query"] == QUERY
     assert params["startdatetime"] == "20240101000000"
     assert params["enddatetime"] == "20240108000000"

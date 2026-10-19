@@ -150,11 +150,11 @@ def test_an_interrupted_backfill_says_how_to_resume(
     monkeypatch.setattr(cli.asyncio, "run", interrupted)
     assert main(["ingest", "news", "--backfill", "--since", "2024-01-01"]) == 130
     out = capsys.readouterr().out
-    assert "stopped: no week finished in this run" in out
+    assert "stopped: no window finished in this run" in out
     assert "resumes where it stopped" in out
 
 
-def test_backfill_summary_reports_the_average_week() -> None:
+def test_backfill_summary_reports_the_average_window() -> None:
     from datetime import timedelta
 
     from talk_is_cheap.cli import _backfill_summary
@@ -165,5 +165,15 @@ def test_backfill_summary_reports_the_average_week() -> None:
         BackfillProgress("NVDA", 3, 146, 120, 13, None, fetched=3, elapsed=timedelta(minutes=9)),
     ]
     assert _backfill_summary(seen) == (
-        "3 weeks fetched in 9m00s (average 3m00s per week), 120 new articles, 1 company started"
+        "3 windows fetched in 9m00s (average 3m00s per window), 120 new articles, 1 company started"
     )
+
+
+def test_backfill_takes_weeks_or_earnings_windows_not_both(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    both = ["ingest", "news", "--backfill", "--since", "2024-01-01", "--around-earnings"]
+    assert main(both) == 2
+    assert "--around-earnings" in capsys.readouterr().err
+    negative = ["ingest", "news", "--backfill", "--around-earnings", "--days-after", "-1"]
+    assert main(negative) == 2

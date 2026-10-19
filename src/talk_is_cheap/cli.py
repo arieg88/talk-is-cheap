@@ -5,7 +5,9 @@ import asyncio
 import os
 import signal
 import sys
+import threading
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -437,16 +439,29 @@ async def _database_reachable(engine: AsyncEngine) -> bool:
     return True
 
 
-def _run_backfill(tickers: Sequence[str] | None, since: date, until: date | None) -> int:
+@dataclass(frozen=True, slots=True)
+class _BackfillRange:
+    """Which windows to backfill: weeks from `since`, or the days around each earnings
+    release."""
+
+    since: date | None = None
+    until: date | None = None
+    days_before: int | None = None  # set for earnings windows
+    days_after: int | None = None
+
+
+def _run_backfill(tickers: Sequence[str] | None, span: _BackfillRange) -> int:
     """Run a backfill that stops cleanly on Ctrl+C or `kill` (SIGTERM), with a summary.
 
-    Every answered part is already stored and every finished week recorded, so stopping
-    loses at most the week in progress, and the same command resumes there.
+    Every answered part is already stored and every finished window recorded, so
+    stopping loses at most the window in progress, and the same command resumes there.
     """
     seen: list[BackfillProgress] = []
-    previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+    # `kill` stops it like Ctrl+C; signal handlers can only be set from the main thread.
+    main_thread = threading.current_thread() is threading.main_thread()
+    previous = signal.signal(signal.SIGTERM, signal.default_int_handler) if main_thread else None
     try:
-        return asyncio.run(_backfill_news(tickers, since, until, seen))
+        return asyncio.run(_backfill_news(tickers, span, seen))
     except KeyboardInterrupt:
         print(
             f"\n{_stamp()} stopped: {_backfill_summary(seen)}. "
@@ -455,7 +470,8 @@ def _run_backfill(tickers: Sequence[str] | None, since: date, until: date | None
         )
         return 130
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        if main_thread:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def _stamp() -> str:
@@ -464,25 +480,31 @@ def _stamp() -> str:
 
 def _backfill_summary(seen: Sequence["BackfillProgress"]) -> str:
     if not seen:
-        return "no week finished in this run"
+        return "no window finished in this run"
     latest = {p.ticker: p for p in seen}
     last = seen[-1]
     new = sum(p.new_articles for p in latest.values())
-    text = f"{last.fetched} weeks fetched in {_duration(last.elapsed.total_seconds())}"
+    text = f"{last.fetched} windows fetched in {_duration(last.elapsed.total_seconds())}"
     if last.fetched:
-        text += f" (average {_duration(last.elapsed.total_seconds() / last.fetched)} per week)"
+        average = _duration(last.elapsed.total_seconds() / last.fetched)
+        text += f" (average {average} per window)"
     started = f"{len(latest)} {'company' if len(latest) == 1 else 'companies'} started"
     return f"{text}, {new} new articles, {started}"
 
 
 async def _backfill_news(
-    tickers: Sequence[str] | None,
-    since: date,
-    until: date | None,
-    seen: list["BackfillProgress"],
+    tickers: Sequence[str] | None, span: _BackfillRange, seen: list["BackfillProgress"]
 ) -> int:
     from talk_is_cheap.news.adapters import load_feeds_file
-    from talk_is_cheap.news.gdelt import GdeltBackfill, backfill
+    from talk_is_cheap.news.gdelt import (
+        GdeltBackfill,
+        backfill,
+        earnings_windows,
+        estimate,
+        plan_backfill,
+        polling_started,
+        weekly_windows,
+    )
     from talk_is_cheap.news.linking import CompanyMatcher
     from talk_is_cheap.news.locks import BACKFILL_LOCK, advisory_locks
     from talk_is_cheap.news.poll import new_client
@@ -499,21 +521,24 @@ async def _backfill_news(
     if not entries:
         print(f"no gdelt backfill source in {feeds_file}", file=sys.stderr)
         return 1
-    start = datetime.combine(since, time(), tzinfo=UTC)
-    end = datetime.combine(until, time(), tzinfo=UTC) if until else datetime.now(UTC)
-    if start >= end:
-        print("--since must be before --until", file=sys.stderr)
-        return 1
+    source = GdeltBackfill.from_entry(
+        entries[0],
+        on_attempt=lambda a: print(
+            f"{_stamp()} GDELT {a.label} {a.start:%Y-%m-%d %H:%M} to {a.end:%Y-%m-%d %H:%M} "
+            f"attempt {a.number}: {a.outcome} in {a.seconds:.1f}s",
+            flush=True,
+        ),
+    )
 
     def report(p: "BackfillProgress") -> None:
         seen.append(p)
         eta = "-" if p.remaining is None else _duration(p.remaining.total_seconds())
         line = (
-            f"{_stamp()} {p.ticker:<6} {p.windows_done}/{p.windows_total} weeks, "
+            f"{_stamp()} {p.ticker:<6} {p.windows_done}/{p.windows_total} windows, "
             f"{p.new_articles} new, {p.requests} requests, about {eta} left"
         )
         if p.skipped:
-            line += f", {p.skipped} weeks skipped"
+            line += f", {p.skipped} windows skipped"
         if p.error is not None:
             print(f"{line}; FAILED: {p.error}", file=sys.stderr, flush=True)
         else:
@@ -527,23 +552,47 @@ async def _backfill_news(
             if not locked:
                 print("another backfill or reprocessing run is in progress", file=sys.stderr)
                 return 1
+            sessions = create_session_factory(engine)
+            not_after = None
+            if span.days_before is not None and span.days_after is not None:
+                async with sessions() as session:
+                    windows = await earnings_windows(
+                        session,
+                        companies,
+                        days_before=span.days_before,
+                        days_after=span.days_after,
+                    )
+                    not_after = await polling_started(session)
+                kind = "earnings windows"
+            else:
+                assert span.since is not None
+                start = datetime.combine(span.since, time(), tzinfo=UTC)
+                end = (
+                    datetime.combine(span.until, time(), tzinfo=UTC)
+                    if span.until
+                    else datetime.now(UTC)
+                )
+                if start >= end:
+                    print("--since must be before --until", file=sys.stderr)
+                    return 1
+                windows = [(c, s, e) for c in companies for s, e in weekly_windows(start, end)]
+                kind = "weeks"
+            planned = await plan_backfill(sessions, source, windows, not_after=not_after)
+            requests, duration = estimate(source, planned)
+            print(
+                f"{_stamp()} {len(planned)} {kind} to fetch ({len(windows) - len(planned)} "
+                f"already fetched{' or covered by RSS polling' if not_after else ''}), at "
+                f"least {requests} requests, about {_duration(duration.total_seconds())} at "
+                "the measured pace; busy windows take longer",
+                flush=True,
+            )
             async with new_client(get_settings().news_user_agent) as client:
                 results = await backfill(
-                    create_session_factory(engine),
-                    GdeltBackfill.from_entry(
-                        entries[0],
-                        on_attempt=lambda a: print(
-                            f"{_stamp()} GDELT {a.label} {a.start:%Y-%m-%d %H:%M} to "
-                            f"{a.end:%Y-%m-%d %H:%M} attempt {a.number}: {a.outcome} "
-                            f"in {a.seconds:.1f}s",
-                            flush=True,
-                        ),
-                    ),
-                    companies,
+                    sessions,
+                    source,
+                    planned,
                     CompanyMatcher([c for c in universe.companies if c.name]),
                     client,
-                    since=start,
-                    until=end,
                     on_progress=report,
                 )
     finally:
@@ -551,17 +600,18 @@ async def _backfill_news(
     skipped = sum(r.skipped for r in results)
     if skipped:
         print(
-            f"\n{_stamp()} The GDELT API kept refusing requests for {skipped} weeks, which "
+            f"\n{_stamp()} The GDELT API kept refusing requests for {skipped} windows, which "
             "were skipped. Running the same command later fetches them and resumes where "
             "it stopped.",
             file=sys.stderr,
         )
+    failed = [r.ticker for r in results if r.error is not None]
     print(
-        f"{_stamp()} done: {sum(r.error is None for r in results)}/{len(companies)} "
-        f"companies, {_backfill_summary(seen)}",
+        f"{_stamp()} done: {len(results) - len(failed)}/{len(results)} companies, "
+        f"{_backfill_summary(seen)}",
         flush=True,
     )
-    return 0 if len(results) == len(companies) and all(r.error is None for r in results) else 1
+    return 1 if failed or skipped else 0
 
 
 async def _reprocess_news() -> int:
@@ -779,8 +829,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="apply the current rules and universe.yaml to stored articles: drop spam, "
         "clean titles, rebuild clusters and company links",
     )
-    news.add_argument("--since", type=date.fromisoformat, help="backfill start, e.g. 2024-01-01")
-    news.add_argument("--until", type=date.fromisoformat, help="backfill end (default: now)")
+    news.add_argument(
+        "--since", type=date.fromisoformat, help="weekly backfill start, e.g. 2024-01-01"
+    )
+    news.add_argument("--until", type=date.fromisoformat, help="weekly backfill end (default: now)")
+    news.add_argument(
+        "--around-earnings",
+        action="store_true",
+        help="backfill the days around each stored earnings release (recommended)",
+    )
+    news.add_argument(
+        "--days-before", type=int, default=1, help="earnings window: days before (default 1)"
+    )
+    news.add_argument(
+        "--days-after", type=int, default=3, help="earnings window: days after (default 3)"
+    )
 
     commands.add_parser("companies", help="list loaded companies")
 
@@ -863,10 +926,25 @@ def _run(args: argparse.Namespace) -> int:
                 return 2
             return asyncio.run(_reprocess_news())
         case "ingest" if args.source == "news" and args.backfill:
-            if args.since is None:
-                print("--backfill needs --since, e.g. --since 2024-01-01", file=sys.stderr)
+            if (args.since is None) == (not args.around_earnings):
+                print(
+                    "--backfill needs either --since (e.g. --since 2024-01-01) or "
+                    "--around-earnings",
+                    file=sys.stderr,
+                )
                 return 2
-            return _run_backfill(args.tickers, args.since, args.until)
+            if args.around_earnings:
+                if args.until or args.days_before < 0 or args.days_after < 0:
+                    print(
+                        "--around-earnings takes --days-before/--days-after of 0 or more and "
+                        "no --until",
+                        file=sys.stderr,
+                    )
+                    return 2
+                span = _BackfillRange(days_before=args.days_before, days_after=args.days_after)
+            else:
+                span = _BackfillRange(since=args.since, until=args.until)
+            return _run_backfill(args.tickers, span)
         case "ingest" if args.source == "news":
             if args.since or args.until:
                 print("--since and --until only apply with --backfill", file=sys.stderr)

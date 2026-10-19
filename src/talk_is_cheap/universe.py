@@ -18,6 +18,10 @@ class UniverseCompany(BaseModel):
     exclude_phrases: list[str] = Field(default_factory=list)
     # Collect news only; filings are not loaded until this is removed.
     news_only: bool = False
+    # Search GDELT only within the configured publishers. Pays off for names that are
+    # common words ("Apple") or heavily covered, whose unfiltered searches fill GDELT's
+    # record limit with articles that are dropped anyway.
+    gdelt_filter_publishers: bool = False
 
     @field_validator("ticker")
     @classmethod
