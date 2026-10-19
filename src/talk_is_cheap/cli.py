@@ -5,7 +5,13 @@ import asyncio
 import os
 import sys
 from collections.abc import Sequence
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from talk_is_cheap import __version__
 from talk_is_cheap.config import get_settings
@@ -24,7 +30,10 @@ from talk_is_cheap.financials import (
     quarterly_financials,
     restatements,
 )
-from talk_is_cheap.universe import Universe, load_universe
+from talk_is_cheap.universe import Universe, UniverseCompany, load_universe
+
+if TYPE_CHECKING:
+    from talk_is_cheap.news.queries import BackfillSource
 
 
 async def _db_check() -> int:
@@ -342,6 +351,340 @@ def _plain(value: Decimal, unit: str) -> str:
     return f"{value:.2f}"
 
 
+# News modules import httpx, feedparser and rapidfuzz, so commands import them when run,
+# keeping CLI startup fast.
+
+
+def _news_config(
+    tickers: Sequence[str] | None,
+) -> tuple[Universe, list[UniverseCompany], Path] | None:
+    settings = get_settings()
+    try:
+        universe = load_universe(settings.universe_file)
+        companies = universe.select_news(tickers)
+    except (OSError, ValueError) as exc:
+        print(f"cannot use {settings.universe_file}: {exc}", file=sys.stderr)
+        return None
+    return universe, companies, settings.feeds_file
+
+
+async def _ingest_news(tickers: Sequence[str] | None) -> int:
+    from talk_is_cheap.news.adapters import build_feeds, load_feeds_file
+    from talk_is_cheap.news.linking import CompanyMatcher
+    from talk_is_cheap.news.locks import POLL_LOCK, advisory_locks
+    from talk_is_cheap.news.poll import FeedPollResult, new_client, poll_feeds
+
+    config = _news_config(tickers)
+    if config is None:
+        return 1
+    universe, companies, feeds_file = config
+    try:
+        feeds = build_feeds(
+            load_feeds_file(feeds_file).feeds, companies, company_feeds_only=bool(tickers)
+        )
+    except (OSError, ValueError) as exc:
+        print(f"cannot use {feeds_file}: {exc}", file=sys.stderr)
+        return 1
+
+    def report(r: FeedPollResult) -> None:
+        if r.error is not None:
+            print(f"{r.key:<34} FAILED: {r.error}", file=sys.stderr)
+        elif r.not_modified:
+            print(f"{r.key:<34} not modified")
+        else:
+            print(
+                f"{r.key:<34} {r.items:>4} items, {r.new:>3} new ({r.clustered} joined a "
+                f"story), {r.duplicates:>3} duplicates, {r.spam} spam"
+            )
+
+    engine = create_engine(get_settings())
+    try:
+        if not await _database_reachable(engine):
+            return 1
+        async with advisory_locks(engine, POLL_LOCK) as locked:
+            if not locked:
+                # A scheduled poll overlapping a slow one: not an error.
+                print("another news poll is still running; skipped")
+                return 0
+            async with new_client(get_settings().news_user_agent) as client:
+                results = await poll_feeds(
+                    create_session_factory(engine),
+                    feeds,
+                    # Link to every company in the universe, not only the polled ones.
+                    CompanyMatcher([c for c in universe.companies if c.name]),
+                    client,
+                    on_result=report,
+                )
+    finally:
+        await engine.dispose()
+    print(
+        f"done: {sum(r.ok for r in results)}/{len(results)} feeds ok, "
+        f"{sum(r.not_modified for r in results)} not modified, "
+        f"{sum(r.new for r in results)} new articles, {sum(r.spam for r in results)} spam dropped"
+    )
+    return 0 if all(r.ok for r in results) else 1
+
+
+async def _database_reachable(engine: AsyncEngine) -> bool:
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    except Exception as exc:  # report any connection failure as a clean CLI error
+        print(f"database: unreachable ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return False
+    return True
+
+
+async def _backfill_news(tickers: Sequence[str] | None, since: date, until: date | None) -> int:
+    from talk_is_cheap.news.adapters import load_feeds_file
+    from talk_is_cheap.news.gdelt import BackfillProgress, GdeltBackfill, backfill
+    from talk_is_cheap.news.linking import CompanyMatcher
+    from talk_is_cheap.news.locks import BACKFILL_LOCK, advisory_locks
+    from talk_is_cheap.news.poll import new_client
+
+    config = _news_config(tickers)
+    if config is None:
+        return 1
+    universe, companies, feeds_file = config
+    try:
+        entries = [e for e in load_feeds_file(feeds_file).backfill if e.type == GdeltBackfill.type]
+    except (OSError, ValueError) as exc:
+        print(f"cannot use {feeds_file}: {exc}", file=sys.stderr)
+        return 1
+    if not entries:
+        print(f"no gdelt backfill source in {feeds_file}", file=sys.stderr)
+        return 1
+    start = datetime.combine(since, time(), tzinfo=UTC)
+    end = datetime.combine(until, time(), tzinfo=UTC) if until else datetime.now(UTC)
+    if start >= end:
+        print("--since must be before --until", file=sys.stderr)
+        return 1
+
+    def report(p: BackfillProgress) -> None:
+        eta = "-" if p.remaining is None else _duration(p.remaining.total_seconds())
+        line = (
+            f"{p.ticker:<6} {p.windows_done}/{p.windows_total} weeks, {p.new_articles} new, "
+            f"{p.requests} requests, about {eta} left"
+        )
+        if p.error is not None:
+            print(f"{line}; FAILED: {p.error}", file=sys.stderr)
+        else:
+            print(line + (" (done)" if p.finished else ""), flush=True)
+
+    engine = create_engine(get_settings())
+    try:
+        if not await _database_reachable(engine):
+            return 1
+        async with advisory_locks(engine, BACKFILL_LOCK) as locked:
+            if not locked:
+                print("another backfill or reprocessing run is in progress", file=sys.stderr)
+                return 1
+            async with new_client(get_settings().news_user_agent) as client:
+                results = await backfill(
+                    create_session_factory(engine),
+                    GdeltBackfill.from_entry(
+                        entries[0],
+                        on_retry=lambda reason, pause: print(
+                            f"GDELT: {reason}, retrying in {pause:.0f}s",
+                            file=sys.stderr,
+                            flush=True,
+                        ),
+                    ),
+                    companies,
+                    CompanyMatcher([c for c in universe.companies if c.name]),
+                    client,
+                    since=start,
+                    until=end,
+                    on_progress=report,
+                )
+    finally:
+        await engine.dispose()
+    if results and results[-1].refused:
+        print(
+            "\nGDELT is refusing requests from this machine, so the backfill stopped. "
+            "Finished weeks are kept; run the same command later to continue, or ask GDELT "
+            "for access (see docs/news.md).",
+            file=sys.stderr,
+        )
+    print(
+        f"done: {sum(r.error is None for r in results)}/{len(companies)} companies, "
+        f"{sum(r.new_articles for r in results)} new articles"
+    )
+    return 0 if len(results) == len(companies) and all(r.error is None for r in results) else 1
+
+
+async def _reprocess_news() -> int:
+    from talk_is_cheap.news.adapters import feed_links
+    from talk_is_cheap.news.gdelt import FEED_LINK, GdeltBackfill
+    from talk_is_cheap.news.linking import CompanyMatcher
+    from talk_is_cheap.news.locks import BACKFILL_LOCK, POLL_LOCK, advisory_locks
+    from talk_is_cheap.news.store import reprocess
+
+    config = _news_config(None)
+    if config is None:
+        return 1
+    universe = config[0]
+    engine = create_engine(get_settings())
+    try:
+        if not await _database_reachable(engine):
+            return 1
+        async with advisory_locks(engine, POLL_LOCK, BACKFILL_LOCK) as locked:
+            if not locked:
+                print("a news poll or backfill is running; try again later", file=sys.stderr)
+                return 1
+            async with create_session_factory(engine)() as session, session.begin():
+                result = await reprocess(
+                    session,
+                    CompanyMatcher([c for c in universe.companies if c.name]),
+                    feed_links() | {GdeltBackfill.type: FEED_LINK},
+                )
+    finally:
+        await engine.dispose()
+    print(
+        f"done: {result.articles} articles, {result.spam_removed} spam removed, "
+        f"{result.titles_changed} titles cleaned, clusters {result.clusters_before} -> "
+        f"{result.clusters_after}, {result.links} links"
+    )
+    return 0
+
+
+async def _feeds(backfill: bool) -> int:
+    from talk_is_cheap.news.queries import backfill_progress, feed_health
+
+    now = datetime.now(UTC)
+    engine = create_engine(get_settings())
+    try:
+        async with create_session_factory(engine)() as session:
+            if backfill:
+                sources = await backfill_progress(session)
+            else:
+                rows = await feed_health(session, now)
+    finally:
+        await engine.dispose()
+    if backfill:
+        return _print_backfill(sources, now)
+    if not rows:
+        print("no feeds polled yet; run `talk-is-cheap ingest news`")
+        return 0
+    print(
+        f"{'FEED':<34}{'STATUS':<9}{'LAST SUCCESS':<14}{'LAST NEW':<14}{'FAILS':>6}"
+        f"{'ARTICLES':>10}  ERROR"
+    )
+    for r in rows:
+        print(
+            f"{r.key:<34}{r.status:<9}{_ago(r.last_success_at, now):<14}"
+            f"{_ago(r.last_new_item_at, now):<14}{r.consecutive_failures:>6}{r.articles:>10}  "
+            f"{(r.last_error or '')[:60]}"
+        )
+    counts = {s: sum(r.status == s for r in rows) for s in ("ok", "stale", "failing", "new")}
+    print("\n" + ", ".join(f"{n} {s}" for s, n in counts.items() if n))
+    return 0
+
+
+async def _news(
+    ticker: str,
+    since: date | None,
+    around_earnings: str | None,
+    min_confidence: Decimal,
+    limit: int,
+) -> int:
+    from talk_is_cheap.news.queries import company_news, earnings_window
+
+    config = _news_config([ticker])
+    if config is None:
+        return 1
+    quarter = None
+    if around_earnings is not None:
+        try:
+            quarter = FiscalQuarter.parse(around_earnings)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+    start = datetime.combine(since, time(), tzinfo=UTC) if since else None
+    end = None
+    engine = create_engine(get_settings())
+    try:
+        async with create_session_factory(engine)() as session:
+            if quarter is not None:
+                window = await earnings_window(session, ticker, quarter)
+                if window is None:
+                    print(
+                        f"{ticker.upper()} {quarter.label}: no earnings release loaded "
+                        "(run `talk-is-cheap ingest edgar` and `ingest filings`)",
+                        file=sys.stderr,
+                    )
+                    return 1
+                start, end = window
+                print(
+                    f"{ticker.upper()} {quarter.label}: earnings release filed "
+                    f"{_utc(start)}; news until {_utc(end)}\n"
+                )
+            stories = await company_news(
+                session,
+                ticker,
+                since=start,
+                until=end,
+                min_confidence=min_confidence,
+                limit=None if quarter else limit,
+            )
+    finally:
+        await engine.dispose()
+    if not stories:
+        print(f"{ticker.upper()}: no news stored for this period")
+        return 0
+    for story in stories:
+        mark = "~" if story.time_precision != "published" else " "
+        others = f"  (+{len(story.others)}: {', '.join(story.others[:3])}"
+        others += ", ...)" if len(story.others) > 3 else ")"
+        print(
+            f"{_utc(story.published_at)}{mark} {(story.publisher or '?')[:22]:<23}"
+            f"{story.title}{others if story.others else ''}"
+        )
+    if any(s.time_precision != "published" for s in stories):
+        print("\n~ = time first seen by GDELT or by this system, not the publish time")
+    return 0
+
+
+def _print_backfill(sources: Sequence["BackfillSource"], now: datetime) -> int:
+    if not sources:
+        print("no backfill run yet; run `talk-is-cheap ingest news --backfill --since ...`")
+        return 0
+    print(
+        f"{'SOURCE':<14}{'WEEKS':>6}  {'COVERED':<23}{'ARTICLES':>9}{'TRUNC':>6}  "
+        f"{'LAST SUCCESS':<14}{'FAILS':>5}  ERROR"
+    )
+    for b in sources:
+        covered = "-"
+        if b.first_window is not None and b.last_window is not None:
+            covered = f"{b.first_window:%Y-%m-%d} to {b.last_window:%Y-%m-%d}"
+        print(
+            f"{b.key:<14}{b.windows:>6}  {covered:<23}{b.articles:>9}{b.truncated:>6}  "
+            f"{_ago(b.last_success_at, now):<14}{b.consecutive_failures:>5}  "
+            f"{(b.last_error or '')[:70]}"
+        )
+    return 0
+
+
+def _utc(moment: datetime) -> str:
+    return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%MZ")
+
+
+def _ago(moment: datetime | None, now: datetime) -> str:
+    if moment is None:
+        return "never"
+    return _duration((now - moment).total_seconds()) + " ago"
+
+
+def _duration(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours}h{minutes:02d}m"
+    return f"{hours // 24}d{hours % 24}h"
+
+
 _TICKERS_HELP = "comma-separated tickers from universe.yaml (default: all)"
 
 
@@ -364,8 +707,50 @@ def build_parser() -> argparse.ArgumentParser:
         "filings", help="text and sections of loaded earnings releases, 10-Qs and 10-Ks"
     )
     filings.add_argument("--tickers", type=_tickers, help=_TICKERS_HELP)
+    news = sources.add_parser(
+        "news", help="one poll of the news feeds in feeds.yaml, or a GDELT backfill"
+    )
+    news.add_argument(
+        "--tickers",
+        type=_tickers,
+        help="comma-separated tickers from universe.yaml (default: all, plus market feeds)",
+    )
+    news.add_argument(
+        "--backfill", action="store_true", help="fetch past news from GDELT instead of polling"
+    )
+    news.add_argument(
+        "--reprocess",
+        action="store_true",
+        help="apply the current rules and universe.yaml to stored articles: drop spam, "
+        "clean titles, rebuild clusters and company links",
+    )
+    news.add_argument("--since", type=date.fromisoformat, help="backfill start, e.g. 2024-01-01")
+    news.add_argument("--until", type=date.fromisoformat, help="backfill end (default: now)")
 
     commands.add_parser("companies", help="list loaded companies")
+
+    feeds = commands.add_parser("feeds", help="health of every polled news feed")
+    feeds.add_argument(
+        "--backfill", action="store_true", help="progress of backfill sources (GDELT) instead"
+    )
+
+    company_news = commands.add_parser(
+        "news", help="a company's news, newest first, one line per story"
+    )
+    company_news.add_argument("ticker")
+    company_news.add_argument("--since", type=date.fromisoformat, help="e.g. 2026-10-01")
+    company_news.add_argument(
+        "--around-earnings",
+        metavar="QUARTER",
+        help="the 48 hours after the quarter's earnings release was filed, e.g. FY2027Q2",
+    )
+    company_news.add_argument(
+        "--min-confidence",
+        type=Decimal,
+        default=Decimal("0.5"),
+        help="lowest link confidence shown (default 0.5; per-company feeds alone give 0.3)",
+    )
+    company_news.add_argument("--limit", type=int, default=50, help="stories shown (default 50)")
 
     covered = commands.add_parser(
         "coverage", help="documents and sections found per company and fiscal quarter"
@@ -417,6 +802,21 @@ def _run(args: argparse.Namespace) -> int:
             return asyncio.run(_db_check())
         case "ingest" if args.source == "edgar":
             return asyncio.run(_ingest_edgar(args.tickers))
+        case "ingest" if args.source == "news" and args.reprocess:
+            if args.backfill or args.tickers or args.since or args.until:
+                print("--reprocess takes no other options", file=sys.stderr)
+                return 2
+            return asyncio.run(_reprocess_news())
+        case "ingest" if args.source == "news" and args.backfill:
+            if args.since is None:
+                print("--backfill needs --since, e.g. --since 2024-01-01", file=sys.stderr)
+                return 2
+            return asyncio.run(_backfill_news(args.tickers, args.since, args.until))
+        case "ingest" if args.source == "news":
+            if args.since or args.until:
+                print("--since and --until only apply with --backfill", file=sys.stderr)
+                return 2
+            return asyncio.run(_ingest_news(args.tickers))
         case "ingest":
             return asyncio.run(_ingest_filings(args.tickers))
         case "companies":
@@ -429,6 +829,18 @@ def _run(args: argparse.Namespace) -> int:
             return asyncio.run(_financials(args.ticker, args.vintage, args.quarters))
         case "restatements":
             return asyncio.run(_restatements(args.ticker))
+        case "feeds":
+            return asyncio.run(_feeds(args.backfill))
+        case "news":
+            return asyncio.run(
+                _news(
+                    args.ticker,
+                    args.since,
+                    args.around_earnings,
+                    args.min_confidence,
+                    args.limit,
+                )
+            )
     return 2  # unreachable: argparse rejects unknown commands
 
 

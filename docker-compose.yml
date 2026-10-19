@@ -1,6 +1,8 @@
 services:
   db:
     image: pgvector/pgvector:pg16
+    # Come back with Docker after a restart or sign-in, for scheduled news polls.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: talkischeap
       POSTGRES_PASSWORD: talkischeap

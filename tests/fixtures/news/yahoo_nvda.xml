@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<rss version="2.0">
+    <channel>
+        <copyright>Copyright (c) 2026 Yahoo Inc. All rights reserved.</copyright>
+        <description>Latest Financial News for NVDA</description>
+        <image>
+            <height>45</height>
+            <link>http://finance.yahoo.com/q/h?s=NVDA</link>
+            <title>Yahoo! Finance: NVDA News</title>
+            <url>https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png</url>
+            <width>144</width>
+        </image>
+        <item>
+            <description>Apple and Nvidia have become the world's first $5 trillion stocks.</description>
+            <guid isPermaLink="false">901cf85d-6694-3a50-9fa5-ed442eb6258b</guid>
+            <link>https://www.fool.com/investing/2026/10/18/the-5-trillion-club-which-is-the-better-stock-to-o/?.tsrc=rss</link>
+            <pubDate>Sun, 18 Oct 2026 20:20:00 +0000</pubDate>
+            <title>The $5 Trillion Club: Which Is the Better Stock to Own, Apple or Nvidia?</title>
+        </item>
+<item>
+            <description>Green Thumb's financial strength could outweigh Washington's regulatory delays.</description>
+            <guid isPermaLink="false">f59ad3de-3599-32a2-b351-77d2d2ae2864</guid>
+            <link>https://www.fool.com/investing/2026/10/18/president-trumps-push-to-reschedule-marijuana-hit/?.tsrc=rss</link>
+            <pubDate>Sun, 18 Oct 2026 18:20:00 +0000</pubDate>
+            <title>President Trump's Push to Reschedule Marijuana Hit a Snag. Is Green Thumb Still a Buy?</title>
+        </item>
+<item>
+            <description>Investors must weigh the pros and cons before making a selection.</description>
+            <guid isPermaLink="false">20cce852-d8f3-3b31-810c-eae02705cdf1</guid>
+            <link>https://www.fool.com/investing/2026/10/18/coca-cola-nike-high-yield-dividend-stock-october/?.tsrc=rss</link>
+            <pubDate>Sun, 18 Oct 2026 17:25:00 +0000</pubDate>
+            <title>Coca-Cola Yields 2.3% and Nike Yields 4.4%. Here's Why Only 1 of These High-Yield Dividend Stocks Is a Buy This October.</title>
+        </item>
+<item>
+            <description>This decade, the top AI stock has produced an average return of 13% in the 11th month of the year.</description>
+            <guid isPermaLink="false">4207df03-8e70-310c-8b3c-bf32f9bc89a7</guid>
+            <link>https://www.fool.com/investing/2026/10/18/history-says-nvidia-stock-november-break-pattern/?.tsrc=rss</link>
+            <pubDate>Sun, 18 Oct 2026 16:51:00 +0000</pubDate>
+            <title>History Says Nvidia Stock Does This in November. Here's the 1 Thing That Could Break the Pattern.</title>
+        </item>
+        <language>en-US</language>
+        <lastBuildDate>Sun, 18 Oct 2026 21:29:42 +0000</lastBuildDate>
+        <link>http://finance.yahoo.com/q/h?s=NVDA</link>
+        <title>Yahoo! Finance: NVDA News</title>
+    </channel>
+</rss>

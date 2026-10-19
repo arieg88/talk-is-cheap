@@ -49,3 +49,37 @@ def test_duplicate_tickers_are_rejected() -> None:
 def test_empty_universe_is_rejected() -> None:
     with pytest.raises(ValidationError):
         make_universe()
+
+
+def test_news_fields_and_news_only_companies() -> None:
+    universe = Universe.model_validate(
+        {
+            "history_start": "2024-01-01",
+            "forms": ["10-K"],
+            "companies": [
+                {"ticker": "GOOGL", "name": "Alphabet", "aliases": [" Google ", ""]},
+                {"ticker": "avgo", "name": "Broadcom", "news_only": True},
+            ],
+        }
+    )
+    googl = universe.companies[0]
+    assert googl.names == ["Alphabet", "Google"]
+    # News-only companies get news but no filings.
+    assert universe.tickers == ["GOOGL"]
+    assert [c.ticker for c in universe.select_news()] == ["GOOGL", "AVGO"]
+    assert [c.ticker for c in universe.select_news(["avgo"])] == ["AVGO"]
+    with pytest.raises(ValueError, match="news only"):
+        universe.select(["AVGO"])
+
+
+def test_news_needs_names() -> None:
+    universe = make_universe("AAPL")
+    with pytest.raises(ValueError, match="needs a name"):
+        universe.select_news()
+    with pytest.raises(ValueError, match="ZZZZ"):
+        universe.select_news(["ZZZZ"])
+
+
+def test_project_universe_names_every_company() -> None:
+    universe = load_universe(PROJECT_ROOT / "universe.yaml")
+    assert len(universe.select_news()) == 15

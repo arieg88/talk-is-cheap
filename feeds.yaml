@@ -1,0 +1,94 @@
+# News feeds polled by `talk-is-cheap ingest news`, and backfill sources for
+# `talk-is-cheap ingest news --backfill`. What each feed returned when it was checked is
+# recorded in docs/news.md.
+#
+# Every entry names an adapter `type` (src/talk_is_cheap/news/adapters.py and gdelt.py).
+#   companies: all   one feed per company in universe.yaml; the url may use {ticker}
+#                    and {query} (the company's name and aliases, quoted, joined by OR)
+#   ticker: NVDA     a feed published by or about one company
+#   name: ...        a market-wide feed, linked to companies only by name matching
+# Feed keys are "<type>:<ticker or name>"; renaming a feed starts a new health record.
+
+feeds:
+  - type: yahoo_finance
+    companies: all
+    url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+
+  - type: google_news
+    companies: all
+    url: "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+
+  - type: rss
+    name: marketwatch-top-stories
+    publisher: MarketWatch
+    url: "https://feeds.content.dowjones.io/public/rss/mw_topstories"
+
+  - type: rss
+    name: cnbc-earnings
+    publisher: CNBC
+    url: "https://www.cnbc.com/id/15839135/device/rss/rss.html"
+
+  # Company newsrooms and investor-relations sites. Companies not listed publish no
+  # reachable feed (see docs/news.md).
+  - type: press_releases
+    ticker: NVDA
+    publisher: NVIDIA Newsroom
+    url: "https://nvidianews.nvidia.com/releases.xml"
+  - type: press_releases
+    ticker: AAPL
+    publisher: Apple Newsroom
+    url: "https://www.apple.com/newsroom/rss-feed.rss"
+  - type: press_releases
+    ticker: MSFT
+    publisher: Microsoft Source
+    url: "https://news.microsoft.com/source/feed/"
+  - type: press_releases
+    ticker: AMD
+    publisher: AMD Investor Relations
+    url: "https://ir.amd.com/news-events/press-releases/rss"
+  - type: press_releases
+    ticker: META
+    publisher: Meta Newsroom
+    url: "https://about.fb.com/news/feed/"
+  - type: press_releases
+    ticker: CRM
+    publisher: Salesforce Newsroom
+    url: "https://www.salesforce.com/news/feed/"
+  - type: press_releases
+    ticker: CSCO
+    publisher: Cisco Newsroom
+    url: "https://newsroom.cisco.com/c/services/i/servlets/newsroom/rssfeed.json?feed=all"
+
+backfill:
+  - type: gdelt
+    companies: all
+    # Only articles from these publishers are kept (GDELT indexes every news site).
+    domains:
+      - reuters.com
+      - bloomberg.com
+      - cnbc.com
+      - marketwatch.com
+      - wsj.com
+      - ft.com
+      - barrons.com
+      - finance.yahoo.com
+      - fool.com
+      - investors.com
+      - seekingalpha.com
+      - businessinsider.com
+      - forbes.com
+      - fortune.com
+      - nytimes.com
+      - washingtonpost.com
+      - apnews.com
+      - theverge.com
+      - techcrunch.com
+      - zdnet.com
+      - theregister.com
+      - tomshardware.com
+      - axios.com
+      - investing.com
+      - benzinga.com
+      - thestreet.com
+      - zacks.com
+      - nasdaq.com

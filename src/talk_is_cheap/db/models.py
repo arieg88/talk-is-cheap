@@ -1,4 +1,4 @@
-"""ORM models for companies, filings, financial data and filing text."""
+"""ORM models for companies, filings, financial data, filing text and news."""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -199,3 +199,113 @@ class Section(Base):
     text: Mapped[str] = mapped_column(Text)
     char_start: Mapped[int] = mapped_column(Integer)
     char_end: Mapped[int] = mapped_column(Integer)
+
+
+class Feed(Base):
+    """A news source polled as one feed (or a backfill source for one company), with its
+    HTTP validators and health."""
+
+    __tablename__ = "feeds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(128), unique=True)  # "yahoo_finance:NVDA"
+    type: Mapped[str] = mapped_column(String(32))
+    url: Mapped[str] = mapped_column(Text)
+    ticker: Mapped[str | None] = mapped_column(String(16))
+    etag: Mapped[str | None] = mapped_column(String(255))
+    last_modified: Mapped[str | None] = mapped_column(String(64))
+    items_hash: Mapped[str | None] = mapped_column(String(64))  # adapters.items_hash
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_new_item_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Article(Base):
+    """A news item's metadata, stored once per canonical URL. Full articles are never
+    stored. Near-duplicate headlines share a `cluster_id` (the id of the cluster's first
+    article)."""
+
+    __tablename__ = "articles"
+    __table_args__ = (
+        CheckConstraint(
+            "time_precision IN ('published', 'seen', 'fetched')", name="time_precision"
+        ),
+        Index("ix_articles_published_at", "published_at"),
+        Index("ix_articles_cluster_id", "cluster_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    url_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    url: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    publisher: Mapped[str | None] = mapped_column(String(255))
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    time_precision: Mapped[str] = mapped_column(String(16))
+    cluster_id: Mapped[int | None] = mapped_column(ForeignKey("articles.id", ondelete="SET NULL"))
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ArticleFeed(Base):
+    """Which feeds supplied an article, and when each first did."""
+
+    __tablename__ = "article_feeds"
+
+    article_id: Mapped[int] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True
+    )
+    feed_id: Mapped[int] = mapped_column(
+        ForeignKey("feeds.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ArticleCompany(Base):
+    """A link from an article to a company, by ticker (news-only companies have no
+    `companies` row), with how it was found and how sure it is."""
+
+    __tablename__ = "article_companies"
+    __table_args__ = (
+        CheckConstraint(
+            "method IN ('issuer', 'ticker', 'headline', 'summary', 'feed')", name="method"
+        ),
+        CheckConstraint("confidence > 0 AND confidence <= 1", name="confidence"),
+        Index("ix_article_companies_ticker", "ticker", "confidence"),
+    )
+
+    article_id: Mapped[int] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True
+    )
+    ticker: Mapped[str] = mapped_column(String(16), primary_key=True)
+    method: Mapped[str] = mapped_column(String(16))
+    confidence: Mapped[Decimal] = mapped_column(Numeric(3, 2))
+
+
+class BackfillWindow(Base):
+    """A date window of historical news fetched for one company from one backfill
+    source. A window is recorded when fully fetched, so a re-run skips it."""
+
+    __tablename__ = "backfill_windows"
+    __table_args__ = (
+        UniqueConstraint("feed_id", "window_start", name="uq_backfill_windows_window"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    feed_id: Mapped[int] = mapped_column(ForeignKey("feeds.id", ondelete="CASCADE"))
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    requests: Mapped[int] = mapped_column(Integer)
+    items: Mapped[int] = mapped_column(Integer)
+    new_articles: Mapped[int] = mapped_column(Integer)
+    # Some part of the window still hit the record limit at the smallest split.
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

@@ -29,6 +29,19 @@ An AI analyst for public companies that compares what management says with what 
 
 On the current 15 companies: a press release for 165 of 165 earnings 8-Ks (plus 12 Tesla deliveries reports, not counted), MD&A in 166 of 166 10-Qs and 10-Ks, risk factors in 43 of 43 10-Ks and 123 of 123 10-Qs, and an outlook with guidance in 124 of 165 quarters with a release. Apple, Alphabet and Oracle (until 2026) give no guidance in their releases; Microsoft's 11 outlook sections only say guidance is given on the call. Tesla's earnings releases are slide decks without HTML tables, so they have no markdown tables.
 
+**News**
+
+- Polls RSS and Atom feeds with one command: Yahoo Finance and Google News per company, MarketWatch and CNBC market-wide, and the newsrooms of Nvidia, Apple, Microsoft, AMD, Meta, Salesforce and Cisco (`feeds.yaml`). Each kind of source is an adapter; adding a feed is an entry in `feeds.yaml`.
+- Stores metadata only: headline, the feed's summary (at most 500 characters), canonical link, publisher and publish time in UTC. Full articles are never downloaded.
+- Stores each article once per canonical URL (tracking parameters removed) and records every feed that supplied it. Near-duplicate headlines, the same story from several outlets, form one cluster.
+- Links articles to companies by name, alias and ticker in the headline and summary, by publisher, and by the company's own feeds, with a method and confidence per link. Per-company feeds alone are weak evidence, since Yahoo's carry stories about other companies and Google News searches ignore case.
+- Tracks each feed's health: last success, last new item, consecutive failures, and a status (ok, stale after 72 hours without new items, failing).
+- Backfills past news from the GDELT DOC 2.0 API by date range, resumably.
+- Drops spam (styled Unicode letters, live-stream bait) and counts it per feed.
+- Polls are safe to repeat and to overlap: unchanged feeds are skipped through conditional requests or an unchanged item fingerprint, one failing feed does not stop the others, and a poll that starts while another runs exits.
+
+What each source returned when checked, and every normalization, clustering and linking rule, are in [docs/news.md](docs/news.md).
+
 **Foundation**
 
 - Python 3.12 package (`talk_is_cheap`) managed with [uv](https://docs.astral.sh/uv/).
@@ -42,7 +55,7 @@ On the current 15 companies: a press release for 165 of 165 earnings 8-Ks (plus 
 - Python 3.12 or newer
 - uv
 - Docker with Docker Compose
-- Network access to `www.sec.gov` and `data.sec.gov` for loading data
+- Network access to `www.sec.gov` and `data.sec.gov` for loading filings, and to the news feeds in `feeds.yaml` and `api.gdeltproject.org` for news
 
 ## Quick start
 
@@ -52,6 +65,7 @@ make install           # create .venv and install dependencies
 make db                # start Postgres + pgvector and wait until healthy
 make migrate           # apply migrations
 make ingest            # load all companies from SEC EDGAR
+uv run talk-is-cheap ingest news   # one poll of the news feeds
 make check             # lint, type check and run all tests
 ```
 
@@ -68,6 +82,11 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap show NVDA FY2026Q3 outlook` | Print every section of one type from the quarter's preferred document (press release, then other earnings exhibits, then the 10-Q or 10-K), with its URL and character ranges; other documents with that section are listed. The quarter can be `latest`; section types are `outlook`, `results`, `other`, `commentary`, `mdna` and `risk_factors`. |
 | `talk-is-cheap financials NVDA [--vintage first\|latest] [--quarters 8]` | Quarterly revenue, margins, net income, EPS, operating cash flow and capex. Derived quarters are marked `*`. |
 | `talk-is-cheap restatements NVDA` | Quarterly values that changed after they were first reported |
+| `talk-is-cheap ingest news [--tickers NVDA,AMD]` | One poll of every feed in `feeds.yaml`, one summary line per feed: items, new articles, how many joined an existing story, duplicates and spam dropped, or `not modified`. With `--tickers`, only those companies' feeds. Exits quietly if another poll is still running. |
+| `talk-is-cheap ingest news --backfill --since 2024-01-01 [--until 2024-07-01] [--tickers NVDA]` | Past news from GDELT, week by week, with progress per company and an estimate of the time left. Re-runs skip finished weeks. Stops after GDELT refuses three requests in a row. |
+| `talk-is-cheap ingest news --reprocess` | Apply the current rules and `universe.yaml` to every stored article: delete spam, clean titles, rebuild near-duplicate clusters and company links. Run it after editing names, aliases or excluded phrases. |
+| `talk-is-cheap feeds [--backfill]` | Health of the polled feeds: status, last success, last new item, consecutive failures, articles, last error. With `--backfill`, the backfill sources instead: weeks fetched, the range they cover, articles and errors. |
+| `talk-is-cheap news NVDA [--since 2026-10-01] [--around-earnings FY2027Q2] [--min-confidence 0.5] [--limit 50]` | A company's news, newest first, one line per story with time (UTC), publisher and headline, and the other publishers of the same story. `--around-earnings` shows the 48 hours after that quarter's earnings release was filed (needs `ingest edgar` and `ingest filings`). Times marked `~` are when GDELT saw the article, not its publish time. |
 | `talk-is-cheap db-check` | Database connectivity, pgvector and migration status |
 
 Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar` and then `ingest filings`.
@@ -76,9 +95,56 @@ Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `i
 
 Add tickers to `universe.yaml`, or move `history_start` earlier, then run `talk-is-cheap ingest edgar`. Only US domestic filers work: companies that file 20-F and 6-K reports have no 10-Q filings. Metrics and the XBRL concepts that report them are configured in `src/talk_is_cheap/edgar/metrics.yaml`.
 
+News needs a `name` per company, the name the press uses, and takes optional `aliases` and `exclude_phrases`:
+
+```yaml
+  - ticker: GOOGL
+    name: Alphabet
+    aliases: [Google]
+  - ticker: AVGO
+    name: Broadcom
+    news_only: true     # collect news now; filings are not loaded until this is removed
+```
+
+RSS feeds only carry recent items and their history cannot be fetched later, so list a company with `news_only: true` as soon as its news matters. `ingest edgar` and `ingest filings` skip news-only companies.
+
+## Scheduled news polling
+
+`ingest news` is a one-shot command; run it every 30 minutes. `scripts/poll-news.sh` runs one poll from wherever the project is checked out and appends a timestamp and the poll's output to `.cache/news-poll.log`. It finds `uv` on the `PATH` or in `~/.local/bin` (set `UV` to override). A poll that starts while the previous one is still running logs "previous poll still running; skipped" and exits; the command also takes a database lock, so overlapping runs never write at the same time, even when started some other way.
+
+### Windows with WSL: Task Scheduler
+
+Use Windows Task Scheduler rather than cron inside WSL: WSL shuts its distribution down when nothing is using it, and cron stops with it, so cron jobs silently stop running. Task Scheduler starts the distribution for each run.
+
+1. Make Docker Desktop start with Windows: Docker Desktop > Settings > General > "Start Docker Desktop when you sign in to your computer". The database container has `restart: unless-stopped`, so it comes back with Docker.
+2. Find your distribution name (`wsl.exe -l -v`) and the script's path (`realpath scripts/poll-news.sh` in the project).
+3. In a Windows Command Prompt, create the task:
+
+   ```bat
+   schtasks /Create /TN "talk-is-cheap news" /SC MINUTE /MO 30 /TR "wsl.exe -d <distro> -- <path to>/scripts/poll-news.sh"
+   ```
+
+4. By default the task runs only while you are signed in, and a console window flashes on each run. To avoid the window, open the task in Task Scheduler > Properties and choose "Run whether user is logged on or not" (it asks for your Windows password), or add `/RU "%USERNAME%" /RP *` to the command above. Docker Desktop only runs while you are signed in, so polls made while signed out fail with "database: unreachable" in the log; that is expected.
+
+Check that it works:
+
+- Task Scheduler shows the task's "Last Run Result" as `0x0` (`0x1` means a feed or the database failed; see the log). If the result is not `0x0` and the log has no new line, `wsl.exe` could not start in the mode chosen in step 4; switch back to "Run only when user is logged on".
+- `tail .cache/news-poll.log` shows a `---` timestamp every 30 minutes, followed by one line per feed and a `done:` summary.
+- `talk-is-cheap feeds` shows "LAST SUCCESS" under 30 minutes for every feed.
+
+### Always-on Linux: cron
+
+```cron
+*/30 * * * * /path/to/talk-is-cheap/scripts/poll-news.sh
+```
+
+The log grows by a few kilobytes per run; truncate or rotate `.cache/news-poll.log` from time to time.
+
 ## Filing layouts handled
 
 Section finding uses general rules; these are the layouts in the current universe that shaped them.
+
+The full reference, with the filing behind each rule, its tests and its limits, is [docs/filing-parsing.md](docs/filing-parsing.md).
 
 | Company | Layout | How it is handled |
 | --- | --- | --- |
@@ -108,7 +174,9 @@ All settings are environment variables. See `.env.example`.
 | --- | --- | --- |
 | `EDGAR_IDENTITY` | unset | Your name and contact email, sent to the SEC. Required by `ingest`. |
 | `EDGAR_DATA_DIR` | `.cache/edgar` | Where edgartools caches SEC responses |
-| `UNIVERSE_FILE` | `universe.yaml` | Companies, filing forms and history start date |
+| `UNIVERSE_FILE` | `universe.yaml` | Companies, filing forms, history start date, and the names news is matched by |
+| `FEEDS_FILE` | `feeds.yaml` | News feeds and backfill sources |
+| `NEWS_USER_AGENT` | `talk-is-cheap/0.1 (news headline collector; metadata only)` | User-Agent sent to news feeds and GDELT |
 | `DATABASE_URL` | local Docker database | Must use the `postgresql+psycopg://` driver prefix |
 | `DATABASE_ECHO` | `false` | Log every SQL statement |
 | `DATABASE_POOL_SIZE` | `5` | Connection pool size, 1 to 50 |
@@ -125,17 +193,33 @@ All settings are environment variables. See `.env.example`.
 | `financial_values` | Normalized metric values per fiscal quarter or year, one row per filing version, with how each was derived |
 | `documents` | One row per parsed document (`press_release`, `earnings_exhibit`, `10q`, `10k`, `deliveries_report` or `other_exhibit`): fiscal quarter, period end, filing date, sec.gov URL, converted text, content hash and parser version |
 | `sections` | Tagged sections of a document: type, title, position, text and the character range of `documents.text` it covers |
+| `feeds` | One row per news feed or backfill source (`yahoo_finance:NVDA`, `rss:cnbc-earnings`, `gdelt:NVDA`): URL, ETag, Last-Modified, item fingerprint, last poll, last success, last new item, consecutive failures, last error |
+| `articles` | One row per canonical URL: headline, summary, publisher, `published_at` (UTC) with its `time_precision` (`published`, `seen` by GDELT, or `fetched` when the feed gave none), and `cluster_id`, shared by near-duplicate headlines |
+| `article_feeds` | Which feeds supplied each article, and when each first did |
+| `article_companies` | Article-company links by ticker (news-only companies have no `companies` row), with `method` (`issuer`, `ticker`, `headline`, `summary`, `feed`) and `confidence` (0-1) |
+| `backfill_windows` | Date windows fetched from GDELT per company, so backfill can resume |
 
 ## Project layout
 
 ```
 talk-is-cheap/
-├── universe.yaml            # companies, forms, history start
+├── universe.yaml            # companies, forms, history start, news names
+├── feeds.yaml               # news feeds and backfill sources
 ├── src/talk_is_cheap/
 │   ├── config.py            # typed settings
 │   ├── cli.py               # talk-is-cheap command
 │   ├── universe.py          # universe.yaml loader
 │   ├── financials.py        # first/latest quarterly values, restatements
+│   ├── news/
+│   │   ├── adapters.py      # feed adapters (Yahoo, Google News, RSS, press releases)
+│   │   ├── gdelt.py         # GDELT backfill: windows, splitting, pacing, resume
+│   │   ├── normalize.py     # canonical URLs, timestamps, titles and summaries
+│   │   ├── dedup.py         # near-duplicate headline clusters
+│   │   ├── linking.py       # article-company links, method and confidence
+│   │   ├── store.py         # articles, feeds, clusters and links in the database
+│   │   ├── poll.py          # one poll of every feed
+│   │   ├── locks.py         # database locks against overlapping runs
+│   │   └── queries.py       # company news, earnings window, feed health
 │   ├── filings/
 │   │   ├── html_text.py     # filing HTML → structured text
 │   │   ├── sections.py      # press release tagging, 10-Q/10-K item splitting
@@ -151,11 +235,12 @@ talk-is-cheap/
 │   │   ├── metrics.yaml     # metrics and their XBRL concepts
 │   │   └── ingest.py        # load and store, per company
 │   └── db/
-│       ├── models.py        # companies, filings, xbrl_facts, financial_values, documents, sections
+│       ├── models.py        # filings and financial data, documents, sections, news tables
 │       ├── base.py, session.py, health.py
+├── scripts/poll-news.sh     # one scheduled news poll, with log and overlap guard
 ├── alembic/                 # migrations
 ├── tests/                   # unit tests; integration/ uses a real database
-│   └── fixtures/            # trimmed real SEC filings
+│   └── fixtures/            # trimmed real SEC filings; news/ holds trimmed real feeds
 ├── docker-compose.yml
 ├── Makefile
 └── .github/workflows/ci.yml
@@ -168,4 +253,4 @@ make test        # all tests; integration tests are skipped if no database is re
 make test-unit   # only tests that need no database
 ```
 
-Tests never call the SEC. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.
+Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; and polling, backfill and the news commands run end to end against the database with mocked feeds. Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.

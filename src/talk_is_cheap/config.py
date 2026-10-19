@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # Where edgartools caches SEC responses.
     edgar_data_dir: Path = Path(".cache/edgar")
 
+    # News feeds and backfill sources.
+    feeds_file: Path = Path("feeds.yaml")
+    # Sent with every news request. Feed publishers see it; keep it descriptive.
+    news_user_agent: str = "talk-is-cheap/0.1 (news headline collector; metadata only)"
+
     @field_validator("database_url")
     @classmethod
     def _require_psycopg_driver(cls, value: str) -> str:

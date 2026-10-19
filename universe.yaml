@@ -1,6 +1,16 @@
 # Companies and history covered by ingestion.
 # To add a company, add its ticker here and run `talk-is-cheap ingest edgar --tickers NEW`.
 # An earlier `history_start` loads more history on the next ingestion run.
+#
+# News fields, per company:
+#   name             the name the press uses; news is matched by it and needs it
+#   aliases          other names that mean the company ("Google" for Alphabet)
+#   exclude_phrases  phrases in which a name means something else ("Big Apple")
+#   news_only: true  collect news without loading filings yet. RSS history cannot be
+#                    backfilled later, so list a company here before its filings are
+#                    needed; remove the flag to load its filings.
+# Names and aliases match with their own capitalization, Title Case or UPPER CASE, as
+# whole words; a lower-case "apple" or "meta" is never a match.
 
 history_start: 2024-01-01
 
@@ -15,17 +25,47 @@ forms:
 
 companies:
   - ticker: AAPL
+    name: Apple
+    exclude_phrases: [Big Apple, Apple pie, Apple cider, Apple orchard, Apple Valley,
+                      Apple Hospitality, Apple Bank, Candy Apple, Adam's Apple, Apple picking,
+                      Apple festival]
   - ticker: MSFT
+    name: Microsoft
   - ticker: NVDA
+    name: Nvidia
   - ticker: AMZN
+    name: Amazon
+    exclude_phrases: [Amazon rainforest, Amazon River, Amazon basin, Amazon jungle,
+                      Amazon region, Brazilian Amazon, Amazonian]
   - ticker: GOOGL
+    name: Alphabet
+    aliases: [Google]
+    # Boilerplate that Google News scrapes into some titles
+    exclude_phrases: [Add Us On Google, preferred source on Google]
   - ticker: META
+    name: Meta
+    aliases: [Meta Platforms, Facebook]
+    exclude_phrases: [Meta-analysis, Meta-analyses, Meta-review, Meta-data, Meta-model,
+                      Meta-models, Meta-learning, Meta-study]
   - ticker: TSLA
+    name: Tesla
+    exclude_phrases: [Nikola Tesla, Tesla coil]
   - ticker: AMD
+    name: AMD
+    aliases: [Advanced Micro Devices]
   - ticker: INTC
+    name: Intel
   - ticker: CRM
+    name: Salesforce
   - ticker: ORCL
+    name: Oracle
+    exclude_phrases: [Oracle of Omaha]
   - ticker: ADBE
+    name: Adobe
   - ticker: NFLX
+    name: Netflix
   - ticker: CSCO
+    name: Cisco
+    exclude_phrases: [Cisco Aguilar]
   - ticker: QCOM
+    name: Qualcomm

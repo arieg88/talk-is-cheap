@@ -59,7 +59,7 @@ def test_show_accepts_only_known_section_types() -> None:
     assert exit_info.value.code == 2
 
 
-@pytest.mark.parametrize("source", ["edgar", "filings"])
+@pytest.mark.parametrize("source", ["edgar", "filings", "news"])
 def test_ingest_rejects_tickers_outside_the_universe(
     source: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -68,15 +68,17 @@ def test_ingest_rejects_tickers_outside_the_universe(
 
 
 def test_cli_startup_does_not_import_edgartools() -> None:
-    """edgartools takes seconds to import; only `ingest` should pay for it."""
+    """edgartools takes seconds to import; only `ingest` should pay for it. The same goes
+    for the HTTP, feed parsing and fuzzy matching libraries news uses."""
     import subprocess
     import sys
 
-    code = "import sys, talk_is_cheap.cli; print('edgar' in sys.modules, 'pandas' in sys.modules)"
+    heavy = ("edgar", "pandas", "httpx", "feedparser", "rapidfuzz")
+    code = f"import sys, talk_is_cheap.cli; print([m for m in {heavy!r} if m in sys.modules])"
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
-    assert result.stdout.strip() == "False False"
+    assert result.stdout.strip() == "[]"
 
 
 # Commands that print more than `head -1` reads. "late" writes its last line after `head`
@@ -113,3 +115,23 @@ def test_output_piped_into_head_exits_quietly(printer: str) -> None:
     )
     assert result.stdout == "line 0\n"
     assert result.stderr == ""
+
+
+def test_backfill_needs_a_start_date(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["ingest", "news", "--backfill"]) == 2
+    assert "--since" in capsys.readouterr().err
+
+
+def test_poll_takes_no_dates(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["ingest", "news", "--since", "2024-01-01"]) == 2
+    assert "--backfill" in capsys.readouterr().err
+
+
+def test_news_rejects_malformed_quarters(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["news", "NVDA", "--around-earnings", "2027-Q2"]) == 1
+    assert "FY2026Q3" in capsys.readouterr().err
+
+
+def test_reprocess_takes_no_other_options(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["ingest", "news", "--reprocess", "--tickers", "NVDA"]) == 2
+    assert "--reprocess" in capsys.readouterr().err

@@ -24,3 +24,5 @@ htmlcov/
 
 # Local data (edgartools response cache)
 .cache/
+prompt.md
+commit-message.txt
