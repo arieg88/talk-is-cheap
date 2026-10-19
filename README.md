@@ -42,6 +42,14 @@ On the current 15 companies: a press release for 165 of 165 earnings 8-Ks (plus 
 
 What each source returned when checked, and every normalization, clustering and linking rule, are in [docs/news.md](docs/news.md).
 
+**Search**
+
+- Makes filing text and news searchable for the agent: `search()` (`retrieval/search.py`) and `talk-is-cheap search` find the passages that answer a question, filtered by company, fiscal period range, date range, source, document type and section type. Every result is citable: the sec.gov URL and character range of the filing text, or the article's link, with its period or publish date and its section or publisher.
+- Chunks each section on its own, on paragraph boundaries, at up to 450 tokens of the embedding model's tokenizer with about 15% overlap. Tables stay whole when they fit; longer ones are split by rows, each piece repeating the header rows. A news article is one chunk, headline and summary. No chunk exceeds the model's 512-token input.
+- Embeds each chunk with a short context header ("NVDA · Nvidia · FY2027 Q2 · press release · outlook") using a local model (BAAI/bge-small-en-v1.5 through fastembed and ONNX Runtime, no torch, no API key).
+- Four modes: keyword (Postgres full text), vector (pgvector HNSW), hybrid (Reciprocal Rank Fusion of both) and rerank (hybrid reordered by a local cross-encoder), the default. Measured on 49 labeled questions in `evals/retrieval/questions.jsonl`: searching by company and period, rerank puts a correct passage in the top 10 for 94% of them (hybrid 86%) at about 1.4 seconds a search on CPU (hybrid 60 ms). Results and choices are in [docs/retrieval.md](docs/retrieval.md).
+- Indexing is incremental: only new or changed text is embedded, chunks of re-parsed or deleted documents and articles are removed, and changing the embedding model re-embeds everything. News added by polling or backfill is indexed by running `talk-is-cheap index` again.
+
 **Foundation**
 
 - Python 3.12 package (`talk_is_cheap`) managed with [uv](https://docs.astral.sh/uv/).
@@ -56,6 +64,7 @@ What each source returned when checked, and every normalization, clustering and 
 - uv
 - Docker with Docker Compose
 - Network access to `www.sec.gov` and `data.sec.gov` for loading filings, and to the news feeds in `feeds.yaml` and `api.gdeltproject.org` for news
+- Network access to `huggingface.co` once, for the search models (about 150 MB, kept in `MODEL_CACHE_DIR`); search and indexing then run offline
 
 ## Quick start
 
@@ -88,9 +97,12 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap ingest news --reprocess` | Apply the current rules and `universe.yaml` to every stored article: delete spam, clean titles, rebuild near-duplicate clusters and company links. Run it after editing names, aliases or excluded phrases. |
 | `talk-is-cheap feeds [--backfill]` | Health of the polled feeds: status, last success, last new item, consecutive failures, articles, last error. With `--backfill`, the backfill sources instead: weeks fetched, the range they cover, articles and errors. |
 | `talk-is-cheap news NVDA [--since 2026-10-01] [--around-earnings FY2027Q2] [--min-confidence 0.5] [--limit 50]` | A company's news, newest first, one line per story with time (UTC), publisher and headline, and the other publishers of the same story. `--around-earnings` shows the 48 hours after that quarter's earnings release was filed (needs `ingest edgar` and `ingest filings`). Times marked `~` are when GDELT saw the article, not its publish time. |
+| `talk-is-cheap index [--tickers NVDA] [--rebuild]` | Chunk and embed filing sections and news for search, one line per company and one for news: chunks added, removed, unchanged, texts embedded, seconds. Only new or changed text is embedded; re-run it after ingesting filings or news. With `--tickers`, those companies' filings and the news linked to them. `--rebuild` drops the selected chunks and their vectors and embeds them again. |
+| `talk-is-cheap search "query" [--ticker NVDA] [--periods FY2026Q1..FY2027Q2] [--since 2026-09-01] [--until 2026-10-19] [--sources filing,news] [--types outlook,mdna] [--doc-types press_release,10k] [--k 8] [--mode keyword\|vector\|hybrid\|rerank]` | Ranked passages with their citations, by `rerank` unless `--mode` says otherwise (`hybrid` is about 25 times faster and finds a little less). `--periods` takes quarters, ranges and whole years (`FY2026`) and only matches filings; `--since`/`--until` match news publish dates and filing dates. For news, `--ticker` counts only company links of confidence 0.5 or more. |
+| `talk-is-cheap eval retrieval [--modes hybrid,rerank] [--filtered] [--details]` | Recall@5, recall@10, MRR and latency of each search mode, with and without the context header, on `evals/retrieval/questions.jsonl`, for all questions and for `lexical` and `paraphrase` ones. `--filtered` also filters each question by its own period or news dates. The first run embeds every chunk's text without its header too (about as long as the first `index`). |
 | `talk-is-cheap db-check` | Database connectivity, pgvector and migration status |
 
-Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar` and then `ingest filings`.
+Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar`, `ingest filings` and then `index`. `make index` indexes new filing text and news; `make eval-retrieval` runs the retrieval benchmark.
 
 ## Adding companies or history
 
@@ -194,6 +206,9 @@ All settings are environment variables. See `.env.example`.
 | `UNIVERSE_FILE` | `universe.yaml` | Companies, filing forms, history start date, and the names news is matched by |
 | `FEEDS_FILE` | `feeds.yaml` | News feeds and backfill sources |
 | `NEWS_USER_AGENT` | `talk-is-cheap/0.1 (news headline collector; metadata only)` | User-Agent sent to news feeds and GDELT |
+| `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model for search embeddings. Changing it re-embeds everything on the next `index`. |
+| `RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | fastembed cross-encoder for `--mode rerank` |
+| `MODEL_CACHE_DIR` | `.cache/fastembed` | Where the models are downloaded |
 | `DATABASE_URL` | local Docker database | Must use the `postgresql+psycopg://` driver prefix |
 | `TEST_DATABASE_URL` | `talkischeap_test` on the local Docker server | Database the tests drop and recreate; the name must end in `_test`. Read from the shell only, not from `.env`. |
 | `DATABASE_ECHO` | `false` | Log every SQL statement |
@@ -216,6 +231,8 @@ All settings are environment variables. See `.env.example`.
 | `article_feeds` | Which feeds supplied each article, and when each first did |
 | `article_companies` | Article-company links by ticker (news-only companies have no `companies` row), with `method` (`issuer`, `ticker`, `headline`, `summary`, `feed`) and `confidence` (0-1) |
 | `backfill_windows` | Date windows fetched from GDELT per company, so backfill can resume |
+| `chunks` | Search passages: source (`filing` or `news`), document, section or article, tickers, fiscal year and quarter (filings), publish time (news; filing date for filings), document and section type, context header, text, character range, token count, content hash of header and text, hash of the text alone, and a generated English `tsvector` with a GIN index |
+| `embeddings` | One vector per embedded text and model, keyed by model name and content hash and shared by every chunk with that text. Each model has its own partial HNSW index (cosine), so vectors of different models are never searched together. |
 
 ## Project layout
 
@@ -238,6 +255,12 @@ talk-is-cheap/
 │   │   ├── poll.py          # one poll of every feed
 │   │   ├── locks.py         # database locks against overlapping runs
 │   │   └── queries.py       # company news, earnings window, feed health
+│   ├── retrieval/
+│   │   ├── chunking.py      # sections and articles → chunks, offsets, token limits
+│   │   ├── encoders.py      # embedding model, reranker and tokenizer (fastembed)
+│   │   ├── index.py         # incremental indexing, context headers, vector indexes
+│   │   ├── search.py        # filters, keyword, vector, hybrid (RRF) and rerank search
+│   │   └── evaluate.py      # retrieval benchmark: recall@k and MRR
 │   ├── filings/
 │   │   ├── html_text.py     # filing HTML → structured text
 │   │   ├── sections.py      # press release tagging, 10-Q/10-K item splitting
@@ -257,6 +280,7 @@ talk-is-cheap/
 │       ├── base.py, session.py, health.py
 ├── scripts/poll-news.sh     # one scheduled news poll, with log and overlap guard
 ├── alembic/                 # migrations
+├── evals/retrieval/         # labeled questions for the retrieval benchmark
 ├── tests/                   # unit tests; integration/ uses a real database
 │   └── fixtures/            # trimmed real SEC filings; news/ holds trimmed real feeds
 ├── docker-compose.yml
@@ -273,4 +297,4 @@ make test-unit   # only tests that need no database
 
 Integration tests never touch the database in `DATABASE_URL`. Each test run drops, recreates and migrates its own database, `talkischeap_test` on the local Docker server, so tests start from an empty database, as in CI. Set `TEST_DATABASE_URL` in the shell to use another one; its name must end in `_test`. Tests read neither `.env` nor the application's variables from the shell: they run with the defaults, and tests that need a setting set it themselves.
 
-Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; and polling, backfill and the news commands run end to end against the database with mocked feeds. Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.
+Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; polling, backfill and the news commands run end to end against the database with mocked feeds; and chunking, indexing and search run without downloading a model, using a word-count tokenizer, a bag-of-words embedder and a word-overlap reranker (`tests/retrieval_fakes.py`). Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.

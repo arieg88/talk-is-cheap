@@ -6,9 +6,11 @@ import os
 import signal
 import sys
 import threading
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
+from datetime import time as day_time
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -566,9 +568,9 @@ async def _backfill_news(
                 kind = "earnings windows"
             else:
                 assert span.since is not None
-                start = datetime.combine(span.since, time(), tzinfo=UTC)
+                start = datetime.combine(span.since, day_time(), tzinfo=UTC)
                 end = (
-                    datetime.combine(span.until, time(), tzinfo=UTC)
+                    datetime.combine(span.until, day_time(), tzinfo=UTC)
                     if span.until
                     else datetime.now(UTC)
                 )
@@ -701,7 +703,7 @@ async def _news(
         except ValueError as exc:
             print(exc, file=sys.stderr)
             return 1
-    start = datetime.combine(since, time(), tzinfo=UTC) if since else None
+    start = datetime.combine(since, day_time(), tzinfo=UTC) if since else None
     end = None
     engine = create_engine(get_settings())
     try:
@@ -790,11 +792,217 @@ def _duration(seconds: float) -> str:
     return f"{hours // 24}d{hours % 24}h"
 
 
+# Indexing and search load the embedding library and models only when run.
+
+
+def _company_names() -> dict[str, str] | None:
+    settings = get_settings()
+    try:
+        universe = load_universe(settings.universe_file)
+    except (OSError, ValueError) as exc:
+        print(f"cannot use {settings.universe_file}: {exc}", file=sys.stderr)
+        return None
+    return {c.ticker: c.name for c in universe.companies if c.name}
+
+
+async def _index(tickers: Sequence[str] | None, rebuild: bool) -> int:
+    from talk_is_cheap.retrieval.encoders import load_embedder
+    from talk_is_cheap.retrieval.index import IndexResult, index
+
+    names = _company_names()
+    if names is None:
+        return 1
+    settings = get_settings()
+    engine = create_engine(settings)
+
+    def report(r: IndexResult) -> None:
+        if r.error is not None:
+            print(f"{r.name:<6} FAILED: {r.error}", file=sys.stderr, flush=True)
+            return
+        print(
+            f"{r.name:<6} {r.added:>5} added, {r.removed:>5} removed, {r.unchanged:>5} "
+            f"unchanged, {r.embedded:>5} embedded, {r.seconds:6.1f}s",
+            flush=True,
+        )
+
+    try:
+        if not await _database_reachable(engine):
+            return 1
+        async with create_session_factory(engine)() as session:
+            loaded = set(await session.scalars(text("SELECT ticker FROM companies")))
+        unknown = sorted({t.upper() for t in tickers or []} - loaded)
+        if unknown:
+            print(f"not loaded: {', '.join(unknown)}", file=sys.stderr)
+            return 1
+        embedder = load_embedder(settings)
+        print(f"embedding model: {embedder.model_name}", flush=True)
+        results = await index(
+            engine,
+            embedder,
+            names,
+            tickers=tickers,
+            rebuild=rebuild,
+            on_result=report,
+            on_note=lambda note: print(note, flush=True),
+        )
+    finally:
+        await engine.dispose()
+    ok = [r for r in results if r.ok]
+    print(
+        f"done: {sum(r.added for r in ok)} added, {sum(r.removed for r in ok)} removed, "
+        f"{sum(r.unchanged for r in ok)} unchanged, {sum(r.embedded for r in ok)} embedded, "
+        f"largest chunk {max((r.largest for r in ok), default=0)} tokens, "
+        f"{sum(r.seconds for r in results):.0f}s"
+    )
+    return 0 if len(ok) == len(results) else 1
+
+
+async def _search(args: argparse.Namespace) -> int:
+    from talk_is_cheap.retrieval.encoders import load_embedder, load_reranker
+    from talk_is_cheap.retrieval.search import Searcher, parse_periods
+
+    periods = None
+    if args.periods:
+        try:
+            periods = parse_periods(args.periods)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+    settings = get_settings()
+    engine = create_engine(settings)
+    try:
+        async with create_session_factory(engine)() as session:
+            searcher = Searcher(
+                session, lambda: load_embedder(settings), lambda: load_reranker(settings)
+            )
+            started = time.monotonic()
+            results = await searcher.search(
+                args.query,
+                tickers=args.ticker,
+                periods=periods,
+                since=args.since,
+                until=args.until,
+                sources=args.sources,
+                doc_types=args.doc_types,
+                section_types=args.types,
+                k=args.k,
+                mode=args.mode,
+            )
+            seconds = time.monotonic() - started
+    finally:
+        await engine.dispose()
+    if not results:
+        print("no passages found")
+        return 0
+    for rank, r in enumerate(results, start=1):
+        if r.source == "news":
+            where = f"{', '.join(r.tickers) or '-'} news {_utc(r.published_at)} {r.publisher or ''}"
+        else:
+            label = r.period.label if r.period else "-"
+            where = (
+                f"{', '.join(r.tickers)} {label} {r.doc_type} {r.section_type}: "
+                f"{r.section_title or '(untitled)'}"
+            )
+        print(f"{rank:>2}. [{r.score:.4f}] {where}")
+        print(f"    {r.citation}")
+        body = " ".join(r.text.split())
+        print(f"    {body[: args.width]}{'…' if len(body) > args.width else ''}\n")
+    print(f"{len(results)} passages in {seconds:.2f}s ({args.mode})")
+    return 0
+
+
+async def _eval_retrieval(
+    questions_file: Path, modes: Sequence[str] | None, filtered: bool, details: bool
+) -> int:
+    from talk_is_cheap.retrieval.encoders import load_embedder, load_reranker
+    from talk_is_cheap.retrieval.evaluate import (
+        CONFIGS,
+        DEPTH,
+        KINDS,
+        Config,
+        Score,
+        evaluate,
+        load_questions,
+        prepare_text_only_vectors,
+    )
+
+    try:
+        questions = load_questions(questions_file)
+    except (OSError, ValueError) as exc:
+        print(f"cannot use {questions_file}: {exc}", file=sys.stderr)
+        return 1
+    configs = [
+        Config(c.mode, c.context_header, filtered)
+        for c in CONFIGS
+        if not modes or c.mode.value in modes
+    ]
+    settings = get_settings()
+    engine = create_engine(settings)
+
+    def report(score: Score) -> None:
+        columns = "".join(
+            f"{score.recall(5, kind):>7.3f}{score.recall(10, kind):>7.3f}{score.mrr(kind):>7.3f}"
+            for kind in (None, *KINDS)
+        )
+        print(f"{score.config.label:<30}{columns}{score.mean_ms:>9.0f}", flush=True)
+
+    try:
+        if not await _database_reachable(engine):
+            return 1
+        sessions = create_session_factory(engine)
+        embedder = load_embedder(settings)
+        reranker = load_reranker(settings)
+        if any(not c.context_header for c in configs):
+            print("embedding chunk text without headers where not done yet ...", flush=True)
+            made = await prepare_text_only_vectors(engine, sessions, embedder)
+            print(f"{made} texts embedded", flush=True)
+        counts = ", ".join(f"{sum(q.kind == k for q in questions)} {k}" for k in KINDS)
+        print(
+            f"{len(questions)} questions ({counts}), {embedder.model_name}, "
+            f"reranker {reranker.model_name}\n"
+        )
+        groups = "".join(f"{label:<21}" for label in ("ALL", *(k.upper() for k in KINDS)))
+        print(f"{'':<30}{groups}")
+        print(
+            f"{'CONFIGURATION':<30}" + f"{'R@5':>7}{'R@10':>7}{'MRR':>7}" * 3 + f"{'MS/QUERY':>9}"
+        )
+        scores = await evaluate(sessions, embedder, reranker, questions, configs, report)
+    finally:
+        await engine.dispose()
+    if details:
+        print(f"\nrank of the first correct passage (- = not in the top {DEPTH})\n")
+        print(f"{'QUESTION':<34}" + "".join(f"{s.config.label[:10]:>11}" for s in scores))
+        for question in questions:
+            ranks = [s.ranks[question.id] for s in scores]
+            print(f"{question.id[:33]:<34}" + "".join(f"{r or '-':>11}" for r in ranks))
+    return 0
+
+
 _TICKERS_HELP = "comma-separated tickers from universe.yaml (default: all)"
 
 
 def _tickers(text: str) -> list[str]:
     return [t for t in text.split(",") if t.strip()]
+
+
+# Search mode `search` uses unless --mode is given, chosen by the retrieval benchmark
+# (docs/retrieval.md).
+DEFAULT_SEARCH_MODE = "rerank"
+DOC_TYPES = ("press_release", "earnings_exhibit", "10q", "10k", "deliveries_report",
+             "other_exhibit", "news")  # fmt: skip
+
+
+def _choices(*allowed: str) -> Callable[[str], list[str]]:
+    def parse(text: str) -> list[str]:
+        values = [v.strip() for v in text.split(",") if v.strip()]
+        unknown = [v for v in values if v not in allowed]
+        if unknown or not values:
+            raise argparse.ArgumentTypeError(
+                f"{', '.join(unknown) or text!r}: choose from {', '.join(allowed)}"
+            )
+        return values
+
+    return parse
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -869,6 +1077,75 @@ def build_parser() -> argparse.ArgumentParser:
         help="lowest link confidence shown (default 0.5; per-company feeds alone give 0.3)",
     )
     company_news.add_argument("--limit", type=int, default=50, help="stories shown (default 50)")
+
+    indexer = commands.add_parser(
+        "index", help="chunk and embed filing sections and news for search (incremental)"
+    )
+    indexer.add_argument("--tickers", type=_tickers, help="comma-separated tickers (default: all)")
+    indexer.add_argument(
+        "--rebuild", action="store_true", help="drop the selected chunks and embed them again"
+    )
+
+    searching = commands.add_parser("search", help="passages of filings and news for a question")
+    searching.add_argument("query")
+    searching.add_argument(
+        "--ticker", type=_tickers, help="company, or comma-separated companies (e.g. NVDA)"
+    )
+    searching.add_argument(
+        "--periods", help="fiscal quarters or ranges, e.g. FY2027Q2 or FY2026Q1..FY2027Q2"
+    )
+    searching.add_argument(
+        "--since", type=date.fromisoformat, help="from this date, e.g. 2026-09-01"
+    )
+    searching.add_argument("--until", type=date.fromisoformat, help="through this date")
+    searching.add_argument(
+        "--sources", type=_choices("filing", "news"), help="filing, news or filing,news"
+    )
+    searching.add_argument(
+        "--types",
+        type=_choices(*(t.value for t in SectionType)),
+        help="section types, e.g. outlook,mdna",
+    )
+    searching.add_argument(
+        "--doc-types",
+        type=_choices(*DOC_TYPES),
+        help="document types, e.g. press_release,10k or news",
+    )
+    searching.add_argument("--k", type=int, default=8, help="passages shown (default 8)")
+    searching.add_argument(
+        "--mode",
+        choices=["keyword", "vector", "hybrid", "rerank"],
+        default=DEFAULT_SEARCH_MODE,
+        help=f"(default {DEFAULT_SEARCH_MODE})",
+    )
+    searching.add_argument(
+        "--width", type=int, default=600, help="characters of each passage shown (default 600)"
+    )
+
+    evaluation = commands.add_parser("eval", help="benchmarks")
+    benchmarks = evaluation.add_subparsers(dest="benchmark", required=True)
+    retrieval = benchmarks.add_parser(
+        "retrieval", help="recall@5, recall@10 and MRR of each search mode on labeled questions"
+    )
+    retrieval.add_argument(
+        "--questions",
+        type=Path,
+        default=Path("evals/retrieval/questions.jsonl"),
+        help="labeled questions (default evals/retrieval/questions.jsonl)",
+    )
+    retrieval.add_argument(
+        "--modes",
+        type=_choices("keyword", "vector", "hybrid", "rerank"),
+        help="modes to run (default: all, each with and without the context header)",
+    )
+    retrieval.add_argument(
+        "--filtered",
+        action="store_true",
+        help="also filter each question by its own period (filings) or dates (news)",
+    )
+    retrieval.add_argument(
+        "--details", action="store_true", help="also print each question's rank per mode"
+    )
 
     covered = commands.add_parser(
         "coverage", help="documents and sections found per company and fiscal quarter"
@@ -962,6 +1239,14 @@ def _run(args: argparse.Namespace) -> int:
             return asyncio.run(_financials(args.ticker, args.vintage, args.quarters))
         case "restatements":
             return asyncio.run(_restatements(args.ticker))
+        case "index":
+            return asyncio.run(_index(args.tickers, args.rebuild))
+        case "search":
+            return asyncio.run(_search(args))
+        case "eval":
+            return asyncio.run(
+                _eval_retrieval(args.questions, args.modes, args.filtered, args.details)
+            )
         case "feeds":
             return asyncio.run(_feeds(args.backfill))
         case "news":

@@ -1,12 +1,15 @@
-"""ORM models for companies, filings, financial data, filing text and news."""
+"""ORM models for companies, filings, financial data, filing text, news and the
+retrieval index."""
 
 from datetime import date, datetime
 from decimal import Decimal
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     ForeignKey,
@@ -19,6 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from talk_is_cheap.db.base import Base
@@ -309,3 +313,81 @@ class BackfillWindow(Base):
     completed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class Chunk(Base):
+    """A passage of filing text or a news article, as indexed for search.
+
+    Filing chunks lie inside one section: `text` is `documents.text[char_start:char_end]`,
+    except that a piece of a split table starts with the table's header rows. A news chunk
+    is the article's headline and summary. `header` is the context header embedded before
+    the text ("NVDA · Nvidia · FY2027 Q2 · press release · outlook").
+
+    `document_id`, `section_id` and `article_id` are not foreign keys: re-parsing a filing
+    replaces its documents, and the next `talk-is-cheap index` removes the chunks left
+    behind and counts them. Search joins the documents and articles, so it never returns
+    such a chunk.
+    """
+
+    __tablename__ = "chunks"
+    __table_args__ = (
+        CheckConstraint("source IN ('filing', 'news')", name="source"),
+        CheckConstraint(
+            "(source = 'filing') = (document_id IS NOT NULL AND section_id IS NOT NULL "
+            "AND fiscal_year IS NOT NULL AND fiscal_quarter IS NOT NULL)",
+            name="filing_fields",
+        ),
+        CheckConstraint("(source = 'news') = (article_id IS NOT NULL)", name="news_fields"),
+        CheckConstraint("char_start >= 0 AND char_end >= char_start", name="char_range"),
+        Index("ix_chunks_document_id", "document_id"),
+        Index("ix_chunks_article_id", "article_id"),
+        Index("ix_chunks_tickers", "tickers", postgresql_using="gin"),
+        Index("ix_chunks_period", "fiscal_year", "fiscal_quarter"),
+        Index("ix_chunks_published_at", "published_at"),
+        Index("ix_chunks_content_hash", "content_hash"),
+        Index("ix_chunks_text_hash", "text_hash"),
+        Index("ix_chunks_search_text", "search_text", postgresql_using="gin"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source: Mapped[str] = mapped_column(String(8))
+    document_id: Mapped[int | None] = mapped_column(BigInteger)
+    section_id: Mapped[int | None] = mapped_column(BigInteger)
+    article_id: Mapped[int | None] = mapped_column(BigInteger)
+    position: Mapped[int] = mapped_column(Integer)  # within the section
+    # The company's ticker for filings; for news, the companies linked with confidence of
+    # at least 0.5 when the chunk was indexed (search reads current links instead).
+    tickers: Mapped[list[str]] = mapped_column(ARRAY(String(16)))
+    fiscal_year: Mapped[int | None] = mapped_column(SmallInteger)
+    fiscal_quarter: Mapped[int | None] = mapped_column(SmallInteger)
+    # News: publish time. Filings: the filing date, at midnight UTC.
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    doc_type: Mapped[str] = mapped_column(String(32))  # documents.doc_type, or "news"
+    section_type: Mapped[str | None] = mapped_column(String(32))
+    header: Mapped[str] = mapped_column(Text)
+    text: Mapped[str] = mapped_column(Text)
+    char_start: Mapped[int] = mapped_column(Integer)
+    char_end: Mapped[int] = mapped_column(Integer)
+    token_count: Mapped[int] = mapped_column(Integer)  # embedded input, specials included
+    content_hash: Mapped[str] = mapped_column(String(64))  # of header, separator and text
+    text_hash: Mapped[str] = mapped_column(String(64))  # of the text alone
+    search_text: Mapped[str] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('english', text)", persisted=True)
+    )
+    indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Embedding(Base):
+    """A vector of one embedded text by one model, shared by every chunk with that text.
+
+    Chunks find theirs by `content_hash` (header and text) or `text_hash` (text alone).
+    Each model has its own HNSW index, a partial index over its rows, so vectors of
+    different models are never searched together.
+    """
+
+    __tablename__ = "embeddings"
+
+    model: Mapped[str] = mapped_column(String(128), primary_key=True)
+    content_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    embedding: Mapped[list[float]] = mapped_column(Vector())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

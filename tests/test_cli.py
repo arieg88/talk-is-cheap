@@ -68,11 +68,13 @@ def test_ingest_rejects_tickers_outside_the_universe(
 
 def test_cli_startup_does_not_import_edgartools() -> None:
     """edgartools takes seconds to import; only `ingest` should pay for it. The same goes
-    for the HTTP, feed parsing and fuzzy matching libraries news uses."""
+    for the HTTP, feed parsing and fuzzy matching libraries news uses, and the embedding
+    library and models indexing and search use."""
     import subprocess
     import sys
 
     heavy = ("edgar", "pandas", "httpx", "feedparser", "rapidfuzz")
+    heavy += ("fastembed", "onnxruntime", "tokenizers", "numpy", "talk_is_cheap.retrieval")
     code = f"import sys, talk_is_cheap.cli; print([m for m in {heavy!r} if m in sys.modules])"
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True

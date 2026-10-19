@@ -1,8 +1,8 @@
 .DEFAULT_GOAL := help
-.PHONY: help install db db-down db-reset migrate db-check ingest lint format typecheck test test-unit check
+.PHONY: help install db db-down db-reset migrate db-check ingest index eval-retrieval lint format typecheck test test-unit check
 
 help: ## List available commands
-	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
 install: ## Install the package and dev tools into .venv
 	uv sync
@@ -22,9 +22,16 @@ migrate: ## Apply all database migrations
 db-check: ## Report database connectivity, pgvector and migration status
 	uv run talk-is-cheap db-check
 
-ingest: ## Load every company in universe.yaml from SEC EDGAR, then parse filing text (needs EDGAR_IDENTITY)
+ingest: ## Load every company in universe.yaml from SEC EDGAR, parse filing text, then index it (needs EDGAR_IDENTITY)
 	uv run talk-is-cheap ingest edgar
 	uv run talk-is-cheap ingest filings
+	uv run talk-is-cheap index
+
+index: ## Chunk and embed new or changed filing text and news for search
+	uv run talk-is-cheap index
+
+eval-retrieval: ## Recall and MRR of each search mode on evals/retrieval/questions.jsonl
+	uv run talk-is-cheap eval retrieval --details
 
 lint: ## Check lint and formatting
 	uv run ruff check .

@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     # Sent with every news request. Feed publishers see it; keep it descriptive.
     news_user_agent: str = "talk-is-cheap/0.1 (news headline collector; metadata only)"
 
+    # Local models for search (fastembed). Changing the embedding model re-embeds
+    # everything on the next `talk-is-cheap index`.
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    rerank_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    # Where the models are downloaded, once.
+    model_cache_dir: Path = Path(".cache/fastembed")
+
     @field_validator("database_url")
     @classmethod
     def _require_psycopg_driver(cls, value: str) -> str:

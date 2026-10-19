@@ -15,12 +15,23 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# Each embedding model's HNSW index is created at run time (retrieval/store.py), not
+# declared on the model, so autogenerate leaves them alone.
+VECTOR_INDEX_PREFIX = "ix_embeddings_hnsw_"
+
+
+def include_object(
+    obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
+) -> bool:
+    return not (type_ == "index" and (name or "").startswith(VECTOR_INDEX_PREFIX))
+
 
 def run_migrations_offline() -> None:
     """Emit SQL to stdout without connecting (`alembic upgrade head --sql`)."""
     context.configure(
         url=get_settings().database_url,
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -29,7 +40,9 @@ def run_migrations_offline() -> None:
 
 
 def _run_sync_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection, target_metadata=target_metadata, include_object=include_object
+    )
     with context.begin_transaction():
         context.run_migrations()
 
