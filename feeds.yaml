@@ -62,7 +62,8 @@ feeds:
 backfill:
   - type: gdelt
     companies: all
-    # Only articles from these publishers are kept (GDELT indexes every news site).
+    # Only articles from these publishers are kept (GDELT indexes every news site). The
+    # list is applied after fetching, not sent to GDELT, which rejects long queries.
     domains:
       - reuters.com
       - bloomberg.com

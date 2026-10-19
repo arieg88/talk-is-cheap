@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import os
+import signal
 import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time
@@ -33,6 +34,7 @@ from talk_is_cheap.financials import (
 from talk_is_cheap.universe import Universe, UniverseCompany, load_universe
 
 if TYPE_CHECKING:
+    from talk_is_cheap.news.gdelt import BackfillProgress
     from talk_is_cheap.news.queries import BackfillSource
 
 
@@ -435,9 +437,52 @@ async def _database_reachable(engine: AsyncEngine) -> bool:
     return True
 
 
-async def _backfill_news(tickers: Sequence[str] | None, since: date, until: date | None) -> int:
+def _run_backfill(tickers: Sequence[str] | None, since: date, until: date | None) -> int:
+    """Run a backfill that stops cleanly on Ctrl+C or `kill` (SIGTERM), with a summary.
+
+    Every answered part is already stored and every finished week recorded, so stopping
+    loses at most the week in progress, and the same command resumes there.
+    """
+    seen: list[BackfillProgress] = []
+    previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        return asyncio.run(_backfill_news(tickers, since, until, seen))
+    except KeyboardInterrupt:
+        print(
+            f"\n{_stamp()} stopped: {_backfill_summary(seen)}. "
+            "Running the same command again resumes where it stopped.",
+            flush=True,
+        )
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _stamp() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _backfill_summary(seen: Sequence["BackfillProgress"]) -> str:
+    if not seen:
+        return "no week finished in this run"
+    latest = {p.ticker: p for p in seen}
+    last = seen[-1]
+    new = sum(p.new_articles for p in latest.values())
+    text = f"{last.fetched} weeks fetched in {_duration(last.elapsed.total_seconds())}"
+    if last.fetched:
+        text += f" (average {_duration(last.elapsed.total_seconds() / last.fetched)} per week)"
+    started = f"{len(latest)} {'company' if len(latest) == 1 else 'companies'} started"
+    return f"{text}, {new} new articles, {started}"
+
+
+async def _backfill_news(
+    tickers: Sequence[str] | None,
+    since: date,
+    until: date | None,
+    seen: list["BackfillProgress"],
+) -> int:
     from talk_is_cheap.news.adapters import load_feeds_file
-    from talk_is_cheap.news.gdelt import BackfillProgress, GdeltBackfill, backfill
+    from talk_is_cheap.news.gdelt import GdeltBackfill, backfill
     from talk_is_cheap.news.linking import CompanyMatcher
     from talk_is_cheap.news.locks import BACKFILL_LOCK, advisory_locks
     from talk_is_cheap.news.poll import new_client
@@ -460,14 +505,17 @@ async def _backfill_news(tickers: Sequence[str] | None, since: date, until: date
         print("--since must be before --until", file=sys.stderr)
         return 1
 
-    def report(p: BackfillProgress) -> None:
+    def report(p: "BackfillProgress") -> None:
+        seen.append(p)
         eta = "-" if p.remaining is None else _duration(p.remaining.total_seconds())
         line = (
-            f"{p.ticker:<6} {p.windows_done}/{p.windows_total} weeks, {p.new_articles} new, "
-            f"{p.requests} requests, about {eta} left"
+            f"{_stamp()} {p.ticker:<6} {p.windows_done}/{p.windows_total} weeks, "
+            f"{p.new_articles} new, {p.requests} requests, about {eta} left"
         )
+        if p.skipped:
+            line += f", {p.skipped} weeks skipped"
         if p.error is not None:
-            print(f"{line}; FAILED: {p.error}", file=sys.stderr)
+            print(f"{line}; FAILED: {p.error}", file=sys.stderr, flush=True)
         else:
             print(line + (" (done)" if p.finished else ""), flush=True)
 
@@ -484,9 +532,10 @@ async def _backfill_news(tickers: Sequence[str] | None, since: date, until: date
                     create_session_factory(engine),
                     GdeltBackfill.from_entry(
                         entries[0],
-                        on_retry=lambda reason, pause: print(
-                            f"GDELT: {reason}, retrying in {pause:.0f}s",
-                            file=sys.stderr,
+                        on_attempt=lambda a: print(
+                            f"{_stamp()} GDELT {a.label} {a.start:%Y-%m-%d %H:%M} to "
+                            f"{a.end:%Y-%m-%d %H:%M} attempt {a.number}: {a.outcome} "
+                            f"in {a.seconds:.1f}s",
                             flush=True,
                         ),
                     ),
@@ -499,16 +548,18 @@ async def _backfill_news(tickers: Sequence[str] | None, since: date, until: date
                 )
     finally:
         await engine.dispose()
-    if results and results[-1].refused:
+    skipped = sum(r.skipped for r in results)
+    if skipped:
         print(
-            "\nGDELT is refusing requests from this machine, so the backfill stopped. "
-            "Finished weeks are kept; run the same command later to continue, or ask GDELT "
-            "for access (see docs/news.md).",
+            f"\n{_stamp()} The GDELT API kept refusing requests for {skipped} weeks, which "
+            "were skipped. Running the same command later fetches them and resumes where "
+            "it stopped.",
             file=sys.stderr,
         )
     print(
-        f"done: {sum(r.error is None for r in results)}/{len(companies)} companies, "
-        f"{sum(r.new_articles for r in results)} new articles"
+        f"{_stamp()} done: {sum(r.error is None for r in results)}/{len(companies)} "
+        f"companies, {_backfill_summary(seen)}",
+        flush=True,
     )
     return 0 if len(results) == len(companies) and all(r.error is None for r in results) else 1
 
@@ -650,7 +701,7 @@ def _print_backfill(sources: Sequence["BackfillSource"], now: datetime) -> int:
         print("no backfill run yet; run `talk-is-cheap ingest news --backfill --since ...`")
         return 0
     print(
-        f"{'SOURCE':<14}{'WEEKS':>6}  {'COVERED':<23}{'ARTICLES':>9}{'TRUNC':>6}  "
+        f"{'SOURCE':<14}{'WEEKS':>6}  {'FIRST TO LAST WEEK':<23}{'ARTICLES':>9}{'TRUNC':>6}  "
         f"{'LAST SUCCESS':<14}{'FAILS':>5}  ERROR"
     )
     for b in sources:
@@ -676,7 +727,11 @@ def _ago(moment: datetime | None, now: datetime) -> str:
 
 
 def _duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
     minutes = int(seconds // 60)
+    if minutes < 10:
+        return f"{minutes}m{int(seconds % 60):02d}s"
     if minutes < 60:
         return f"{minutes}m"
     hours, minutes = divmod(minutes, 60)
@@ -811,7 +866,7 @@ def _run(args: argparse.Namespace) -> int:
             if args.since is None:
                 print("--backfill needs --since, e.g. --since 2024-01-01", file=sys.stderr)
                 return 2
-            return asyncio.run(_backfill_news(args.tickers, args.since, args.until))
+            return _run_backfill(args.tickers, args.since, args.until)
         case "ingest" if args.source == "news":
             if args.since or args.until:
                 print("--since and --until only apply with --backfill", file=sys.stderr)

@@ -84,43 +84,53 @@ reach Google News, where the publisher rule (section 5) links them.
 ### GDELT DOC 2.0 (backfill)
 
 - **Endpoint:** `api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=json`, no key.
-- **How far back:** a query for January 2024 returned articles, so the full
-  `history_start` range (2024-01-01) is searchable. Queries for October 2016 and February
-  2017, which would settle whether the archive reaches GDELT's announced January 2017
-  start or only three months, were refused by the rate limit below.
-- **Record limit:** 250 articles per query. A week of Nvidia coverage across all
-  publishers filled the limit in five days, so weeks are split in half while full, down
-  to three hours.
+- **How far back:** articles from January 2024 are returned (a backfill of the week of
+  2024-01-01 for Nvidia stored them), so the full `history_start` range is searchable.
+  Whether the archive reaches GDELT's announced January 2017 start was not tested.
+- **One query per company and week:** the query names the company (name and aliases)
+  in English and nothing else. A query listing all 28 configured publisher domains (743
+  characters) was answered "Your query was too short or too long", so publishers are
+  filtered locally after fetching, against `backfill` domains in `feeds.yaml`.
+- **Record limit:** 250 articles per query, counted before local filtering. A part that
+  comes back full is split in half and both halves are queried, down to 30 minutes
+  (`MIN_WINDOW`, GDELT dates have 15-minute resolution), so filtering never hides lost
+  articles; a 30-minute part that is still full is recorded as truncated and counted by
+  `feeds --backfill`. Measured on 2026-10-19, a week took one query for Cisco (March
+  2024), Qualcomm (August 2026) and Salesforce (November 2024), 7 for Adobe (January
+  2024), 13 for Nvidia (January 2024) and about 90 for Apple (June 2026): GDELT's search
+  ignores case, so "Apple" and "Adobe" also match the fruit and the building material.
+  Splitting the domain list into groups instead took 4 queries for every company-week.
 - **Dates:** `seendate` is when GDELT's crawler saw the article, not when it was
   published; such articles have `time_precision = 'seen'` and are marked `~` by
   `talk-is-cheap news`.
 - **Titles** come with spaces around punctuation ("Buybacks . The Real Prize"), which are
   removed.
 - **Errors in a query** (a phrase that is too short, unbalanced parentheses) come back as
-  plain text with status 200 and are reported as failures.
-- **Query length:** one query naming all 28 configured domains (743 characters) was
-  answered "Your query was too short or too long"; queries of about 100 characters were
-  answered. The limit is not documented, so the domains are split into groups that keep
-  each query within 250 characters (`MAX_QUERY_CHARS`), four queries per company and
-  window with the current list. Dropped connections ("Server disconnected without
-  sending a response") are retried like timeouts.
-- **Refusals:** GDELT asks for at most one request every 5 seconds and refuses others
-  with HTTP 429 and "Please limit requests to one every 5 seconds". From this machine it
-  refused almost everything, even a first request after hours of quiet: of about 20
-  requests over 2026-10-18 and 2026-10-19, spaced from 20 seconds to 10 hours apart, two
-  were answered (October 2026 and January 2024). The backfill has therefore not been
-  run against GDELT from here; it is tested against recorded answer shapes.
-- **Retries:** requests are paced at least 5 seconds apart, and each refusal doubles the
-  pace (up to 60 seconds). A window gets at most three requests, 30 and 60 seconds
-  apart, within three minutes (`ATTEMPTS`, `PAUSES`, `MAX_WINDOW_SECONDS`), then counts
-  as failed. Three refusals in a row (`STOP_AFTER_REFUSALS`), in one window or across
-  windows, mean GDELT is refusing this machine: the backfill stops for every company,
-  the failure is recorded on that company's source, and the command says so. Finished
-  weeks are kept, so running it again later continues.
-- **Availability:** GDELT's servers at times did not complete the TLS handshake within
-  10 seconds, while other hosts answered at once. Requests to GDELT get 30 seconds to
-  connect and 90 to answer; timeouts and connection errors are retried within the same
-  limits but do not count as refusals.
+  plain text with status 200 and fail that company's run at once.
+- **Refusals:** GDELT asks for at most one request every 5 seconds and answers others
+  with HTTP 429 and "Please limit requests to one every 5 seconds". As of 2026-10-19 the
+  API refuses most requests intermittently from every network tested, including a phone
+  on a different network on its first request. Every answer, refusals included, takes
+  about 10 seconds, so the service is overloaded and a 429 means "busy, retry", not a
+  penalty: retrying the same query every 10 seconds was answered within 1 to 5 tries,
+  for 2024 dates as well.
+- **Retries:** after a refusal, a timeout, a dropped connection ("Server disconnected
+  without sending a response") or a server error, the same request is retried 10
+  seconds after the answer (`RETRY_PAUSE`), and requests never start closer than 5
+  seconds apart (`MIN_INTERVAL`). Requests get 30 seconds to connect and 90 to answer
+  (`TIMEOUT`). After 30 failures in a row (`MAX_FAILURES`, about 10 minutes) the window
+  is skipped and left unrecorded, the run says the GDELT API kept refusing requests,
+  and it moves on; running the same command again fetches the skipped windows. Every
+  attempt is printed with its outcome and response time.
+- **Speed:** measured on 2026-10-19 over five full weeks (Nvidia and Adobe January 2024,
+  Cisco March 2024, Salesforce November 2024, Qualcomm August 2026): 113 attempts for 23
+  answered requests (about one in five answered), 10-17 seconds per answer, and 1.0,
+  1.6, 2.2, 8.1 and 24 minutes per week, 7.4 minutes on average. At that average the
+  15 companies since 2024-01-01 (about 2,190 weeks) take about 270 hours, 11 days of
+  continuous running. Apple is far slower (29 minutes covered 16 hours of one week, about
+  5 hours a week extrapolated), so the companies whose names are common words (Apple,
+  Amazon, Meta, Oracle) and the most covered ones (Nvidia, Microsoft, Alphabet, Tesla)
+  can take weeks on their own.
 
 ## 3. Normalization
 
@@ -212,18 +222,24 @@ Matching rules (`linking.py`):
 - `ok`: otherwise.
 
 Backfill sources (`gdelt:<ticker>`) are not polled feeds and are left out of this table
-and its totals. `talk-is-cheap feeds --backfill` shows them: weeks fetched, the range
-they cover, articles, weeks still over the record limit, last success and last error.
+and its totals. `talk-is-cheap feeds --backfill` shows them: weeks fetched, the first
+and last of them (with any gaps between), articles, weeks still over the record limit, last success and last error.
 
 ## 7. Backfill
 
 `talk-is-cheap ingest news --backfill --since 2024-01-01 [--until ...] [--tickers ...]`
-searches GDELT for each company's names in English, from the publisher domains listed
-under `backfill` in `feeds.yaml`, one week at a time (`news/gdelt.py`). Each fetched part
-is stored at once, through the same normalization, deduplication and linking as feed
-items. A week is recorded in `backfill_windows` when all of it is stored; a re-run skips
-recorded weeks, so an interrupted run continues where it stopped. Weeks that ended less
-than a day ago are fetched but not recorded, since GDELT is still adding to them.
-Progress is printed per company every minute with an estimate of the time remaining. A
-company whose window fails stops there, and the next company starts; when GDELT refuses
-this machine, the whole backfill stops (section 2).
+searches GDELT for each company's names in English, one week at a time, keeping articles
+from the publisher domains listed under `backfill` in `feeds.yaml` (`news/gdelt.py`).
+Each answered part is stored at once, through the same normalization, deduplication and
+linking as feed items. A week is recorded in `backfill_windows` when all of it is
+stored; a re-run skips recorded weeks. Weeks that ended less than a day ago are fetched
+but not recorded, since GDELT is still adding to them.
+
+The run prints every request (part, attempt number, outcome, response time) and one
+timestamped line per week (weeks done, new articles, requests, time left), so it can run unattended with output appended to a log
+(README, "Long backfills"). It is safe to stop at any point: Ctrl+C or `kill` (SIGTERM)
+prints a summary of the run (weeks fetched, average time per week, new articles), and
+loses at most the week in progress, whose stored articles are kept and found again as
+duplicates on the next run. A window that fails 30 times in a row is skipped and fetched
+by the next run (section 2); a company whose window fails with another error stops
+there and the next company starts.

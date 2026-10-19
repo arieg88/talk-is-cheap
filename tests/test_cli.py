@@ -135,3 +135,35 @@ def test_news_rejects_malformed_quarters(capsys: pytest.CaptureFixture[str]) -> 
 def test_reprocess_takes_no_other_options(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["ingest", "news", "--reprocess", "--tickers", "NVDA"]) == 2
     assert "--reprocess" in capsys.readouterr().err
+
+
+def test_an_interrupted_backfill_says_how_to_resume(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl+C (or `kill`, which the backfill treats the same) stops with a summary."""
+    import talk_is_cheap.cli as cli
+
+    def interrupted(coroutine: object) -> int:
+        coroutine.close()  # type: ignore[attr-defined]
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.asyncio, "run", interrupted)
+    assert main(["ingest", "news", "--backfill", "--since", "2024-01-01"]) == 130
+    out = capsys.readouterr().out
+    assert "stopped: no week finished in this run" in out
+    assert "resumes where it stopped" in out
+
+
+def test_backfill_summary_reports_the_average_week() -> None:
+    from datetime import timedelta
+
+    from talk_is_cheap.cli import _backfill_summary
+    from talk_is_cheap.news.gdelt import BackfillProgress
+
+    seen = [
+        BackfillProgress("NVDA", 2, 146, 80, 9, None, fetched=2, elapsed=timedelta(minutes=6)),
+        BackfillProgress("NVDA", 3, 146, 120, 13, None, fetched=3, elapsed=timedelta(minutes=9)),
+    ]
+    assert _backfill_summary(seen) == (
+        "3 weeks fetched in 9m00s (average 3m00s per week), 120 new articles, 1 company started"
+    )

@@ -1,23 +1,28 @@
 """Historical news from the GDELT DOC 2.0 API: `talk-is-cheap ingest news --backfill`.
 
-Each company is searched by its name and aliases, in English, restricted to the
-publisher domains configured in feeds.yaml, one week at a time. The domains are split
-into groups so that each query stays within MAX_QUERY_CHARS, one query per group. GDELT
-returns at most MAX_RECORDS articles per query, so a part that comes back full is split
-in half until it fits or reaches MIN_WINDOW. Items go through the same normalization,
-deduplication, linking and storage as feed items. GDELT's date is when its crawler saw
-the article, not the publish time, so articles are stored with time precision "seen".
+Each company is searched by its name and aliases in English, one query per week, without
+a publisher filter (GDELT rejects long queries). Publishers are filtered locally against
+the domains configured in feeds.yaml. GDELT returns at most MAX_RECORDS articles per
+query, and local filtering happens after that limit, so a part that comes back full is
+split in half and both halves are queried, down to MIN_WINDOW; a part still full there is
+recorded as truncated. Items go through the same normalization, deduplication, linking
+and storage as feed items. GDELT's date is when its crawler saw the article, not the
+publish time, so articles are stored with time precision "seen".
 
-Requests are paced at least MIN_INTERVAL apart. GDELT refuses requests it does not want
-(HTTP 429, "Please limit requests to one every 5 seconds"); the pace then slows (up to
-MAX_INTERVAL) and the request is retried after a pause. Timeouts and connection errors
-are retried the same way. A window gets at most ATTEMPTS requests within
-MAX_WINDOW_SECONDS. After STOP_AFTER_REFUSALS refusals in a row, GDELT is taken to be
-refusing this machine: the backfill stops (GdeltRefused) and finished weeks are kept. A
-window is recorded in `backfill_windows` once all of it is fetched and stored, so an
-interrupted run continues where it stopped and a re-run of a finished range sends no
-requests. Windows that end less than SETTLE_TIME ago are fetched
-but not recorded, since GDELT is still adding to them.
+As of 2026-10-19 the API is overloaded: every answer, a refusal (HTTP 429, "Please limit
+requests to one every 5 seconds") included, takes about 10 seconds, and refuses most
+requests intermittently from every network tested, even a first request. A refusal
+means "busy, retry": the same request is answered within a few tries. So after a
+refusal, a timeout, a dropped connection or a server error the request is retried
+RETRY_PAUSE after the answer, never sooner than MIN_INTERVAL after the previous request.
+After MAX_FAILURES failures in a row the window is skipped (GdeltGaveUp) and left for
+the next run; the backfill moves on.
+
+Each answered part is stored at once, and a window is recorded in `backfill_windows`
+once all of it is stored, so stopping at any point (Ctrl+C, a killed process) loses at
+most the window in progress, and running the same command again resumes there. Windows
+that end less than SETTLE_TIME ago are fetched but not recorded, since GDELT is still
+adding to them.
 """
 
 import asyncio
@@ -25,7 +30,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -49,19 +54,14 @@ from talk_is_cheap.universe import UniverseCompany
 
 API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 MAX_RECORDS = 250
-# GDELT answers "Your query was too short or too long" to a 743-character query with 28
-# domains; queries of about 100 characters were answered. The exact limit is not
-# documented, so the domain list is split to keep each query this short.
-MAX_QUERY_CHARS = 250
 WINDOW = timedelta(days=7)
-MIN_WINDOW = timedelta(hours=3)
-MIN_INTERVAL = 5.0  # seconds between requests, GDELT's published limit
-MAX_INTERVAL = 60.0
-ATTEMPTS = 3
-MAX_WINDOW_SECONDS = 180.0
-STOP_AFTER_REFUSALS = 3
-PAUSES = (30.0, 60.0)  # before the second and third attempts
-# GDELT can take tens of seconds to accept a connection and to answer.
+# GDELT's dates have 15-minute resolution; a part this short that is still full is kept
+# as truncated.
+MIN_WINDOW = timedelta(minutes=30)
+MIN_INTERVAL = 5.0  # seconds between request starts, GDELT's published limit
+RETRY_PAUSE = 10.0  # seconds after a refused or failed answer before trying again
+MAX_FAILURES = 30  # in a row before a window is skipped (about 10 minutes)
+# Answers take 10-15 seconds while GDELT is busy, and sometimes much longer.
 TIMEOUT = httpx.Timeout(90.0, connect=30.0)
 SETTLE_TIME = timedelta(days=1)
 # GDELT searches the full text, ignoring case, so a hit alone is weak evidence.
@@ -71,12 +71,12 @@ _SPACE_BEFORE_PUNCTUATION = re.compile(r"\s+([.,;:!?%)'\u2019])")
 _SPACE_AFTER_OPENING = re.compile(r"([($])\s+")
 
 
-class GdeltRefused(FeedError):
-    """GDELT refused STOP_AFTER_REFUSALS requests in a row."""
+class GdeltGaveUp(FeedError):
+    """A window failed MAX_FAILURES times in a row; it is left for the next run."""
 
 
 class Pacer:
-    """Spaces requests at least `interval` seconds apart; slows down when told to."""
+    """Spaces requests at least `interval` seconds apart."""
 
     def __init__(self, interval: float = MIN_INTERVAL) -> None:
         self.interval = interval
@@ -88,9 +88,6 @@ class Pacer:
             await asyncio.sleep(delay)
         self._last = time.monotonic()
 
-    def slow_down(self) -> None:
-        self.interval = min(MAX_INTERVAL, self.interval * 2)
-
 
 class GdeltBackfill:
     """GDELT DOC 2.0 article search for one configured `backfill` entry."""
@@ -101,36 +98,24 @@ class GdeltBackfill:
         self,
         domains: Sequence[str],
         pacer: Pacer | None = None,
-        on_retry: Callable[[str, float], None] | None = None,
+        on_attempt: Callable[["Attempt"], None] | None = None,
     ) -> None:
         self.domains = [d.lower().removeprefix("www.") for d in domains]
         self.pacer = pacer or Pacer()
-        # Told the reason and the pause before each retry.
-        self.on_retry = on_retry
-        self.refusals = 0  # in a row, across windows
+        # Told about every request: what was asked, how it went, how long it took.
+        self.on_attempt = on_attempt
 
     @classmethod
     def from_entry(
-        cls, entry: FeedEntry, on_retry: Callable[[str, float], None] | None = None
+        cls, entry: FeedEntry, on_attempt: Callable[["Attempt"], None] | None = None
     ) -> "GdeltBackfill":
-        return cls(entry.domains, on_retry=on_retry)
+        return cls(entry.domains, on_attempt=on_attempt)
 
-    def queries(self, company: UniverseCompany) -> list[str]:
-        """The company's search, once per group of domains that keeps each query within
-        MAX_QUERY_CHARS (GDELT rejects long queries)."""
+    def query(self, company: UniverseCompany) -> str:
+        """The company's names, in English; publishers are filtered after fetching."""
         names = " OR ".join(f'"{name}"' for name in company.names)
         base = f"({names})" if len(company.names) > 1 else names
-        if not self.domains:
-            return [f"{base} sourcelang:english"]
-        queries: list[str] = []
-        group: list[str] = []
-        for domain_name in self.domains:
-            if group and len(_query(base, [*group, domain_name])) > MAX_QUERY_CHARS:
-                queries.append(_query(base, group))
-                group = []
-            group.append(domain_name)
-        queries.append(_query(base, group))
-        return queries
+        return f"{base} sourcelang:english"
 
     async def fetch_window(
         self,
@@ -138,9 +123,15 @@ class GdeltBackfill:
         query: str,
         start: datetime,
         end: datetime,
+        label: str = "",
     ) -> tuple[list[RawItem], bool]:
         """Articles matching `query` that GDELT saw in [start, end), and whether the answer
-        hit MAX_RECORDS (the window holds more). FeedError when GDELT cannot answer."""
+        hit MAX_RECORDS (the part holds more).
+
+        Refusals, timeouts, dropped connections and server errors are retried RETRY_PAUSE
+        after the answer; after MAX_FAILURES in a row, GdeltGaveUp. Other errors raise
+        FeedError at once. `label` (the ticker) is passed on to `on_attempt`.
+        """
         params = {
             "query": query,
             "mode": "artlist",
@@ -150,38 +141,37 @@ class GdeltBackfill:
             "startdatetime": start.strftime("%Y%m%d%H%M%S"),
             "enddatetime": end.strftime("%Y%m%d%H%M%S"),
         }
-        started = time.monotonic()
-        last_error = ""
-        for attempt in range(ATTEMPTS):
+        for attempt in range(1, MAX_FAILURES + 1):
             await self.pacer.wait()
+            sent = time.monotonic()
             try:
                 response = await client.get(API_URL, params=params, timeout=TIMEOUT)
             except httpx.TransportError as exc:
                 # GDELT's servers are often slow to accept connections, or drop them.
-                last_error = f"{type(exc).__name__}: {exc}".rstrip(": ")
+                outcome = f"{type(exc).__name__}: {exc}".rstrip(": ")
             except httpx.HTTPError as exc:
                 raise FeedError(f"{type(exc).__name__}: {exc}".rstrip(": ")) from exc
             else:
                 if response.status_code == 200 and not _is_refusal(response.text):
-                    self.refusals = 0
                     items, raw_count = self.parse(response.text)
+                    self._report(label, start, end, attempt, f"{raw_count} articles", sent)
                     return items, raw_count >= MAX_RECORDS
-                if response.status_code not in (200, 429):
+                if response.status_code not in (200, 429) and response.status_code < 500:
                     raise FeedError(f"HTTP {response.status_code}: {response.text[:200]}")
-                self.refusals += 1
-                last_error = f"refused (HTTP {response.status_code}: {_first_line(response.text)})"
-                if self.refusals >= STOP_AFTER_REFUSALS:
-                    raise GdeltRefused(f"GDELT {last_error}, {self.refusals} times in a row")
-                self.pacer.slow_down()
-            if attempt + 1 == ATTEMPTS:
-                break
-            pause = PAUSES[min(attempt, len(PAUSES) - 1)]
-            if time.monotonic() - started + pause > MAX_WINDOW_SECONDS:
-                break
-            if self.on_retry is not None:
-                self.on_retry(last_error, pause)
-            await asyncio.sleep(pause)
-        raise FeedError(f"{last_error}; gave up on this window")
+                outcome = f"refused (HTTP {response.status_code})"
+            self._report(label, start, end, attempt, outcome, sent)
+            if attempt < MAX_FAILURES:
+                await asyncio.sleep(RETRY_PAUSE)
+        raise GdeltGaveUp(
+            f"the GDELT API kept refusing requests: {MAX_FAILURES} failed attempts in a row "
+            f"for {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} (last: {outcome})"
+        )
+
+    def _report(
+        self, label: str, start: datetime, end: datetime, attempt: int, outcome: str, sent: float
+    ) -> None:
+        if self.on_attempt is not None:
+            self.on_attempt(Attempt(label, start, end, attempt, outcome, time.monotonic() - sent))
 
     def parse(self, body: str) -> tuple[list[RawItem], int]:
         """The wanted articles of an answer, and how many articles it held in all (domain
@@ -216,15 +206,6 @@ class GdeltBackfill:
         return not self.domains or any(host == d or host.endswith(f".{d}") for d in self.domains)
 
 
-def _query(base: str, domains: Sequence[str]) -> str:
-    sites = " OR ".join(f"domainis:{d}" for d in domains)
-    return (
-        f"{base} ({sites}) sourcelang:english"
-        if len(domains) > 1
-        else (f"{base} domainis:{domains[0]} sourcelang:english")
-    )
-
-
 def _is_refusal(body: str) -> bool:
     return body.lstrip().startswith("Please limit requests")
 
@@ -251,6 +232,18 @@ def windows(since: datetime, until: datetime) -> list[tuple[datetime, datetime]]
 
 
 @dataclass(frozen=True, slots=True)
+class Attempt:
+    """One request to GDELT."""
+
+    label: str
+    start: datetime
+    end: datetime
+    number: int  # 1 for the first try of this part
+    outcome: str  # "250 articles", "refused (HTTP 429)", "ReadTimeout: ..."
+    seconds: float  # from sending the request to its answer or failure
+
+
+@dataclass(frozen=True, slots=True)
 class BackfillProgress:
     ticker: str
     windows_done: int
@@ -258,9 +251,11 @@ class BackfillProgress:
     new_articles: int
     requests: int
     remaining: timedelta | None  # estimate for all selected companies
+    fetched: int = 0  # windows fetched in this run, all companies
+    elapsed: timedelta = timedelta()  # since this run started
     finished: bool = False
     error: str | None = None
-    refused: bool = False  # GDELT refused this machine; the backfill stopped here
+    skipped: int = 0  # windows of this company left for the next run (GdeltGaveUp)
 
 
 @dataclass(slots=True)
@@ -281,11 +276,13 @@ async def backfill(
     since: datetime,
     until: datetime,
     on_progress: Callable[[BackfillProgress], None] | None = None,
-    progress_every: timedelta = timedelta(minutes=1),
 ) -> list[BackfillProgress]:
-    """Backfill each company over [since, until). A company whose window fails stops
-    there and the next one starts; when GDELT refuses this machine the whole backfill
-    stops. Finished windows are always kept."""
+    """Backfill each company over [since, until), reporting progress after every window.
+
+    A window that fails MAX_FAILURES times in a row is skipped and left for the next run.
+    A company whose window fails with another error stops there and the next one starts.
+    Finished windows are always kept.
+    """
     plans = []
     async with session_factory() as session, session.begin():
         for company in companies:
@@ -306,20 +303,37 @@ async def backfill(
     started = time.monotonic()
     fetched_windows = 0
     results = []
+
+    def progress(ticker: str, done: int, total: int, new: int, requests: int) -> BackfillProgress:
+        return BackfillProgress(
+            ticker,
+            done,
+            total,
+            new,
+            requests,
+            _estimate(started, fetched_windows, remaining_windows),
+            fetched=fetched_windows,
+            elapsed=timedelta(seconds=round(time.monotonic() - started)),
+        )
+
     for company, feed_id, to_fetch, total in plans:
         feed = FeedRef(feed_id, f"{source.type}:{company.ticker}", Link(company.ticker, *FEED_LINK))
         done_count, new, requests = total - len(to_fetch), 0, 0
-        last_report = time.monotonic()
         error = None
-        refused = False
+        skipped = 0
         for index, (start, end) in enumerate(to_fetch):
             try:
                 window = await _fetch_window(
                     session_factory, source, client, company, feed, matcher, start, end
                 )
+            except GdeltGaveUp as exc:
+                skipped += 1
+                remaining_windows -= 1
+                async with session_factory() as session, session.begin():
+                    await record_failure(session, feed_id, datetime.now(UTC), str(exc))
+                continue
             except FeedError as exc:
                 error = str(exc)
-                refused = isinstance(exc, GdeltRefused)
                 async with session_factory() as session, session.begin():
                     await record_failure(session, feed_id, datetime.now(UTC), error)
                 remaining_windows -= len(to_fetch) - index
@@ -329,35 +343,17 @@ async def backfill(
             remaining_windows -= 1
             new += window.new
             requests += window.requests
-            due = time.monotonic() - last_report >= progress_every.total_seconds()
-            if on_progress is not None and due:
-                last_report = time.monotonic()
-                on_progress(
-                    BackfillProgress(
-                        company.ticker,
-                        done_count,
-                        total,
-                        new,
-                        requests,
-                        _estimate(started, fetched_windows, remaining_windows),
-                    )
-                )
-        progress = BackfillProgress(
-            company.ticker,
-            done_count,
-            total,
-            new,
-            requests,
-            _estimate(started, fetched_windows, remaining_windows),
+            if on_progress is not None and index + 1 < len(to_fetch):
+                on_progress(progress(company.ticker, done_count, total, new, requests))
+        result = replace(
+            progress(company.ticker, done_count, total, new, requests),
             finished=True,
             error=error,
-            refused=refused,
+            skipped=skipped,
         )
-        results.append(progress)
+        results.append(result)
         if on_progress is not None:
-            on_progress(progress)
-        if refused:
-            break  # the other companies would be refused too
+            on_progress(result)
     return results
 
 
@@ -371,17 +367,20 @@ async def _fetch_window(
     start: datetime,
     end: datetime,
 ) -> _WindowResult:
-    """Fetch and store one window for each query, splitting a part while GDELT's answer is
-    full."""
+    """Fetch and store one window, splitting a part in half while GDELT's answer is full.
+
+    GdeltGaveUp when one part fails MAX_FAILURES times in a row.
+    """
     result = _WindowResult()
-    pending = [(query, start, end) for query in source.queries(company)]
+    query = source.query(company)
+    pending = [(start, end)]
     while pending:
-        query, part_start, part_end = pending.pop(0)
-        items, full = await source.fetch_window(client, query, part_start, part_end)
+        part_start, part_end = pending.pop(0)
+        items, full = await source.fetch_window(client, query, part_start, part_end, company.ticker)
         result.requests += 1
         if full and part_end - part_start > MIN_WINDOW:
             middle = part_start + (part_end - part_start) / 2
-            pending[:0] = [(query, part_start, middle), (query, middle, part_end)]
+            pending[:0] = [(part_start, middle), (middle, part_end)]
             continue
         result.truncated |= full
         now = datetime.now(UTC)

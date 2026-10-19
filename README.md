@@ -83,7 +83,7 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap financials NVDA [--vintage first\|latest] [--quarters 8]` | Quarterly revenue, margins, net income, EPS, operating cash flow and capex. Derived quarters are marked `*`. |
 | `talk-is-cheap restatements NVDA` | Quarterly values that changed after they were first reported |
 | `talk-is-cheap ingest news [--tickers NVDA,AMD]` | One poll of every feed in `feeds.yaml`, one summary line per feed: items, new articles, how many joined an existing story, duplicates and spam dropped, or `not modified`. With `--tickers`, only those companies' feeds. Exits quietly if another poll is still running. |
-| `talk-is-cheap ingest news --backfill --since 2024-01-01 [--until 2024-07-01] [--tickers NVDA]` | Past news from GDELT, week by week, with progress per company and an estimate of the time left. Re-runs skip finished weeks. Stops after GDELT refuses three requests in a row. |
+| `talk-is-cheap ingest news --backfill --since 2024-01-01 [--until 2024-07-01] [--tickers NVDA]` | Past news from GDELT, one timestamped progress line per week with an estimate of the time left. Safe to stop at any point; re-running resumes. A week that fails 30 times in a row is skipped for the next run. See "Long backfills" below. |
 | `talk-is-cheap ingest news --reprocess` | Apply the current rules and `universe.yaml` to every stored article: delete spam, clean titles, rebuild near-duplicate clusters and company links. Run it after editing names, aliases or excluded phrases. |
 | `talk-is-cheap feeds [--backfill]` | Health of the polled feeds: status, last success, last new item, consecutive failures, articles, last error. With `--backfill`, the backfill sources instead: weeks fetched, the range they cover, articles and errors. |
 | `talk-is-cheap news NVDA [--since 2026-10-01] [--around-earnings FY2027Q2] [--min-confidence 0.5] [--limit 50]` | A company's news, newest first, one line per story with time (UTC), publisher and headline, and the other publishers of the same story. `--around-earnings` shows the 48 hours after that quarter's earnings release was filed (needs `ingest edgar` and `ingest filings`). Times marked `~` are when GDELT saw the article, not its publish time. |
@@ -107,6 +107,18 @@ News needs a `name` per company, the name the press uses, and takes optional `al
 ```
 
 RSS feeds only carry recent items and their history cannot be fetched later, so list a company with `news_only: true` as soon as its news matters. `ingest edgar` and `ingest filings` skip news-only companies.
+
+## Long backfills
+
+As of 2026-10-19 the GDELT API is overloaded: it refuses most requests intermittently (from every network tested) and every answer takes about 10 seconds. A refused request is retried 10 seconds later, never more than one request per 5 seconds, and a week that fails 30 times in a row is skipped and left for the next run. A full backfill takes days, so run it unattended with a log:
+
+```bash
+nohup uv run talk-is-cheap ingest news --backfill --since 2024-01-01 >> .cache/backfill.log 2>&1 &
+tail -f .cache/backfill.log          # every request with its response time, one line per week
+talk-is-cheap feeds --backfill       # weeks fetched, first and last week, per company
+```
+
+Stopping is safe at any point: press Ctrl+C, or `kill` the process (`pkill -f "ingest news --backfill"`). It prints a one-line summary (weeks fetched, average time per week, new articles), keeps every finished week and every article already stored, and running the same command again resumes with the first unfinished or skipped week. Only one backfill runs at a time; scheduled polls keep running alongside it.
 
 ## Scheduled news polling
 

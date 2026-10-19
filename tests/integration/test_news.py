@@ -29,7 +29,14 @@ from talk_is_cheap.db.models import (
 from talk_is_cheap.edgar.ingest import ingest_edgar
 from talk_is_cheap.filings.ingest import ingest_filings
 from talk_is_cheap.news.adapters import FeedEntry, build_feeds, feed_links
-from talk_is_cheap.news.gdelt import API_URL, MAX_RECORDS, GdeltBackfill, Pacer, backfill
+from talk_is_cheap.news.gdelt import (
+    API_URL,
+    MAX_FAILURES,
+    MAX_RECORDS,
+    GdeltBackfill,
+    Pacer,
+    backfill,
+)
 from talk_is_cheap.news.linking import CompanyMatcher
 from talk_is_cheap.news.locks import POLL_LOCK, advisory_locks
 from talk_is_cheap.news.poll import poll_feeds
@@ -378,7 +385,7 @@ async def test_backfill_splits_full_windows_and_resumes(
             # The first week is full: it must be split in half.
             return httpx.Response(200, text=gdelt_answer(MAX_RECORDS, since, "full"))
         if start.startswith("20250113"):
-            return httpx.Response(500, text="GDELT is down")
+            return httpx.Response(404, text="not found")
         moment = datetime.strptime(start, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
         return httpx.Response(200, text=gdelt_answer(3, moment, start))
 
@@ -394,7 +401,7 @@ async def test_backfill_splits_full_windows_and_resumes(
         ("20250109120000", "20250113000000"),
         ("20250113000000", "20250120000000"),
     ]
-    assert first.error is not None and "HTTP 500" in first.error
+    assert first.error is not None and "HTTP 404" in first.error
     assert (first.windows_done, first.windows_total, first.new_articles) == (1, 2, 6)
 
     async with sessions() as session:
@@ -438,7 +445,7 @@ async def test_backfill_splits_full_windows_and_resumes(
     assert third.requests == 0 and third.windows_done == 2
 
 
-async def test_refusals_stop_the_whole_backfill(
+async def test_a_window_that_keeps_failing_is_skipped_and_the_run_goes_on(
     sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def no_sleep(seconds: float) -> None:
@@ -448,10 +455,19 @@ async def test_refusals_stop_the_whole_backfill(
     since = datetime(2025, 1, 6, tzinfo=UTC)
     source = GdeltBackfill([], pacer=Pacer(interval=0))
     refusal = "Please limit requests to one every 5 seconds or contact us."
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        # TICA's first week is always refused; everything else is answered.
+        if "Ticacorp" in request.url.params["query"] and request.url.params[
+            "startdatetime"
+        ].startswith("20250106"):
+            return httpx.Response(429, text=refusal)
+        return httpx.Response(200, text="")
+
     with respx.mock(assert_all_called=False) as router:
-        router.get(API_URL).mock(return_value=httpx.Response(429, text=refusal))
+        router.get(API_URL).mock(side_effect=respond)
         async with httpx.AsyncClient() as client:
-            results = await backfill(
+            tica, ticn = await backfill(
                 sessions,
                 source,
                 UNIVERSE.select_news(),
@@ -460,16 +476,16 @@ async def test_refusals_stop_the_whole_backfill(
                 since=since,
                 until=since + timedelta(days=14),
             )
-        assert router.calls.call_count == 3  # TICN was never tried
-    (tica,) = results
-    assert tica.refused and tica.error is not None and "3 times in a row" in tica.error
+        assert router.calls.call_count == MAX_FAILURES + 1 + 2
+    assert (tica.skipped, tica.windows_done, tica.error) == (1, 1, None)
+    assert (ticn.skipped, ticn.windows_done) == (0, 2)
 
     async with sessions() as session:
         polled = {h.key for h in await feed_health(session, datetime.now(UTC))}
         sources = {b.key: b for b in await backfill_progress(session)}
     assert "gdelt:TICA" not in polled  # backfill sources are not polled feeds
-    assert sources["gdelt:TICA"].consecutive_failures == 1
-    assert sources["gdelt:TICA"].windows == 0
+    # The skipped week is not recorded, so the next run fetches it.
+    assert sources["gdelt:TICA"].windows == 1
 
 
 @pytest.fixture
