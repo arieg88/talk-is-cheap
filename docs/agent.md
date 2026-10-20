@@ -8,7 +8,9 @@ The agent never does arithmetic in its head, never states a number that is not i
 result, and checks its draft before it answers. Every claim cites an SEC filing URL or a
 news article link. What executives said in the news comes from `get_statements`, with who
 said it, the outcome and the comparison with formal guidance, always "reported by
-<publisher>" (section 2, [statements.md](statements.md)).
+<publisher>" (section 2, [statements.md](statements.md)). Whether executives kept their
+public promises comes from `get_promises` and `get_track_record`, the promise tracker's
+verdicts and track records ([promises.md](promises.md)).
 
 ## 1. Graph
 
@@ -38,6 +40,9 @@ node), and the `final` answer with its `sources`.
 1. **Router** (`agent/router.py`). Rules first, the model only when they cannot decide:
    - advice ("should I buy", "price target", "good investment") and predictions ("will
      the stock", "will Meta beat") are `out_of_scope`, marked as about trading;
+   - whether promises were kept ("promise", "deliver on", "kept his word", "track record",
+     "hold up", "walked back", "follow through"), with one company or none:
+     `guidance_check` ("Which executive's promises hold up best?" names no company);
    - two or more covered companies named: `comparison`;
    - one company and a guidance word (guidance, outlook, expect, beat, miss): `guidance_check`;
    - one company and several periods ("over the last four quarters", "from Q2 2025 to
@@ -108,9 +113,12 @@ raising.
 | `resolve_company` | name or ticker | CIK, ticker, name, SEC name, fiscal year end, latest reported quarter; or the three closest matches and the covered tickers |
 | `get_actuals` | ticker, up to 6 metrics, up to 12 periods (`FY2027Q2`, `FY2026`, `latest`, `latest-1`, ...), vintage `first` or `latest` (default) | one item per metric and period: value, unit, a display form (`$96,221M`), form, filing date, accession number and the filing's primary document URL; derived quarters carry their derivation; what was not found is listed |
 | `get_guidance` | ticker, metric, issued period, target period, limit (10, at most 20) | guidance rows, newest issue first: low, high, point, unit, basis, measure, segment, conditions (200 characters), verdict and reason, actual as first reported, difference, the quote (300 characters) and the release URL; `review` when the plausibility check flagged the row and what the reviewer decided. Rows reviewed as wrong have no verdict and `counts_in_verdicts` false, as `guidance` treats them. For a company without guidance: one item stating it, citing its latest release |
-| `get_statements` | ticker, metric, period (a target `FY2026Q3`, a fiscal year with its quarters, or a calendar year `2025`), speaker, `management_only` (default true), `checkable_only`, limit (10, at most 20) | claims reported in the news, newest first: speaker and role (the roster's when verified), attribution and whether it is management's, venue, date (with a note when it is the article's), publisher, published date, the claim, a quote of at most 40 words, metric, target, figures and unit, direction; for management claims the verdict and its reason, the actual as first reported, the review state, the comparison with formal guidance and the guidance row's range and issue date, and a plan's filing passage. Claims by others say they are not scored. With nothing matching, it says whether claims by others exist. Provenance `news_report` |
-| `search_filings` | query, ticker, periods, document types, section types, k (6, at most 10) | `rerank` search (the retrieval default) over filing text: passage (700 characters), period, document type, section, and the document URL with the chunk's character range |
-| `search_news` | query, ticker, since, until, k | headline, publisher, date, summary (300 characters), link, and the article's link confidence for the ticker |
+| `get_statements` | ticker, metric, period (a target `FY2026Q3`, a fiscal year with its quarters, or a calendar year `2025`), speaker, `management_only` (default true), `checkable_only`, `date_from`, `date_to` (statement dates), limit (10, at most 20) | claims reported in the news, newest first: speaker and role (the roster's when verified), attribution and whether it is management's, venue, date (with a note when it is the article's), publisher, published date, the claim, a quote of at most 40 words, metric, target, figures and unit, direction; for management claims the verdict and its reason, the actual as first reported, the review state, the comparison with formal guidance and the guidance row's range and issue date, and a plan's filing passage. Claims by others say they are not scored. With nothing matching, it says whether claims by others exist. Provenance `news_report` |
+| `search_filings` | query, ticker, periods, document types (with Tesla's deliveries reports), section types, `date_from`, `date_to` (filing dates), k (6, at most 10) | `rerank` search (the retrieval default) over filing text: passage (700 characters), period, filing date, document type, section, and the document URL with the chunk's character range |
+| `search_news` | query, ticker, `date_from`, `date_to`, k | headline, publisher, date, summary (300 characters), link, and the article's link confidence for the ticker |
+| `get_promises` | ticker, query (words the subject or quote contains), speaker, verdict, due before, due after, limit (8, at most 15) | promises made in public, newest first: quote (40 words), speaker, date, publisher and article link, subject, the fixed resolution rule, due date, specificity, bold, the verdict that counts (a review's first; `too_early` or null is "too early to judge"), target, required and measured value, the judge's reasoning, days late, failed checks; and each promise's outcome evidence (at most 3) as items of their own with their filing or article URL. Vague claims have `scored: false`. Provenance `news_report` |
+| `get_track_record` | ticker, speaker, by (`executive` or `company`) | per group: claims, resolved claims by verdict, vague claims not scored, and the on-time rate, share walked back, bold share and hit rate and median days late, or `judgment: "too few to judge"` under 5 resolved claims. Each item cites the promises it was computed from (`inputs`), like a `compute` result |
+| `cite_value` | an evidence id and the exact span holding one number | the number and its unit, read in code from that item's text, as new evidence with the source's URL and date (used by the promise resolver) |
 | `compute` | `pct_change`, `difference`, `ratio`, `sum` or `margin`, over evidence ids (`E3`, or `E5.point` for a field) | the result as new evidence that cites its inputs. `pct_change` and `margin` are in percent. Operands of different units are refused for `pct_change`, `difference` and `sum` |
 | `run_sql` | one SELECT | columns and at most 200 rows (cells cut at 300 characters). It has no URL: figures in an answer are cited from `get_actuals` or `get_guidance` |
 
@@ -122,7 +130,8 @@ raising.
   WITH clause), SELECT INTO, FOR UPDATE, DDL, COPY, SET and unparsed commands are refused.
 - Tables: only `companies`, `filings`, `financial_values`, `documents`, `sections`,
   `guidance`, `guidance_sources`, `guidance_reviews`, `stock_splits`, `articles`,
-  `article_companies`, `statements` and `statement_outcomes`, plus the query's own WITH
+  `article_companies`, `statements`, `statement_outcomes`, `promises`, `promise_verdicts`
+  and `promise_reviews`, plus the query's own WITH
   names, and no schema but `public`. The
   ledger, agent runs, checkpoints, `pg_catalog` and `information_schema` are out.
 - Functions: an allowlist of aggregates, window, arithmetic, string, date and cast
@@ -417,6 +426,34 @@ with guidance for Nvidia's Q2 fiscal 2025 outlook; verdicts for Qualcomm's, Tesl
 Amazon's), and were narrowed with `outcome: false`. All of this is in the results files.
 The set is small, was drafted from the stored data without the project's own list of
 news questions, and was used to fix one prompt rule; there is no held-out set.
+
+### With the promise tracker (prompts v3), 2026-10-20
+
+Router, planner, executor and answer prompts are `v3` (verifier `v2` unchanged): the
+router sends promise questions to the guidance-check path by rule, the planner lists
+`get_promises` and `get_track_record`, the executor's rules say a promise's verdict is the
+tool's, "too early to judge" and "not scored" are said as such, and the claim's article
+and the outcome evidence are cited; the answer keeps those phrases.
+
+**Smoke set: 20 of 20 pass all four scores**, $0.0666 for 108 paid calls
+(`evals/agent/results/20261020T173641Z.json`): no regression.
+
+**News set**: 14 questions, the 8 earlier ones and 6 about promises (Nvidia's Blackwell
+and dividend promises, AMD's 2024 AI revenue, Musk's Roadster production, which must be
+"too early to judge", Jensen Huang's "poised for our next wave of growth", which must
+not be scored, and "Which executive's promises hold up best?", whose groups are "too few
+to judge" but Nvidia's company statements). Their facts are checked against `promises`
+(`agent/smoke.py`: `promise`, `not_scored`, `track_record`).
+
+The run stopped at its $0.07 cap after the 8 earlier questions
+(`20261020T174020Z.json`): 6 of 8 pass, against 7 of 8 before. Meta's capex question
+fails as before. `news-nvda-q2fy25-revenue` regressed: its draft wrote "May 22–23, 2024",
+the number check read "–23" as a figure, and after two revisions the news sentences were
+left out, so the answer cites only the release. The number check now strips day ranges
+("May 22–23", tested), at no cost. **The 6 promise questions were not run with the
+model**: the promise tracker's spending had reached its share of the budget. With the
+scripted model (`eval agent --dry-run`) all 6 pass, which checks the tools, the routing,
+the harness and the scoring, not the model's answers.
 
 ## 6. Known limitations
 

@@ -52,6 +52,9 @@ ALLOWED_TABLES = frozenset(
         "article_companies",
         "statements",
         "statement_outcomes",
+        "promises",
+        "promise_verdicts",
+        "promise_reviews",
     }
 )
 

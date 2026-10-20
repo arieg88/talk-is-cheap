@@ -19,7 +19,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from importlib.resources import files
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -56,6 +55,7 @@ from talk_is_cheap.guidance.llm import (
     Usage,
     complete,
     estimate_usage,
+    load_prompt_file,
 )
 from talk_is_cheap.guidance.matching import item_key, refresh_verdicts
 from talk_is_cheap.guidance.schema import Extraction
@@ -69,11 +69,7 @@ CONCURRENCY = 4
 
 
 def load_prompt(version: str = PROMPT_VERSION) -> str:
-    return (
-        files("talk_is_cheap")
-        .joinpath("prompts", PROMPT_NAME, f"{version}.md")
-        .read_text(encoding="utf-8")
-    )
+    return load_prompt_file(PROMPT_NAME, version)
 
 
 @dataclass(frozen=True, slots=True)

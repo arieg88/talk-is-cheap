@@ -41,6 +41,14 @@ _GUIDANCE = re.compile(
     r"\b(guid\w*|outlook|forecast\w*|expect\w*|beat|miss\w*|met (?:its|their)|target\w*)\b",
     re.IGNORECASE,
 )
+# Questions about whether executives kept their public promises, with or without a
+# company: "Did Musk deliver on what he said about production?", "Which executive's
+# promises hold up best?".
+_PROMISE = re.compile(
+    r"\b(promis\w*|deliver(?:ed)? on|kept (?:his|her|their|its) word|track records?|"
+    r"hold(?:s)? up|walk(?:ed)? back|follow(?:ed)? through|made good on)\b",
+    re.IGNORECASE,
+)
 _TREND = re.compile(
     r"\b(trend\w*|over the (?:last|past)|(?:last|past) (?:\d+|two|three|four|five|six|eight|few|"
     r"several) (?:quarters|years)|each quarter|every quarter|quarter over quarter|"
@@ -93,6 +101,8 @@ def route_by_rules(
     if _PREDICTION.search(question):
         return Route("out_of_scope", "asks for a prediction", trading=True)
     companies = companies_in(question, universe)
+    if len(companies) < 2 and _PROMISE.search(question):
+        return Route("guidance_check", "asks whether promises were kept")
     if len(companies) >= 2:
         return Route("comparison", f"names {len(companies)} companies")
     if not companies:
@@ -116,6 +126,7 @@ def out_of_scope_answer(question: str, universe: Universe, *, trading: bool) -> 
         "I can't help with that one. I answer questions about what these companies "
         f"reported and said, from their SEC filings, earnings releases and news: {tickers}.",
         "For example: reported figures as first reported or as restated, guidance and "
+        "whether executives kept their public promises, "
         "whether results beat it, trends across quarters, comparisons between two "
         "companies, and explanations or risk factors from their 10-Qs and 10-Ks.",
     ]

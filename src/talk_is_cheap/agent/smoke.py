@@ -116,6 +116,22 @@ NO_MANAGEMENT = re.compile(
     r"(?:didn't|did not|has not|have not) (?:said|say|made|given|provided|commented))\b",
     re.IGNORECASE,
 )
+PROMISE_VERDICT_WORDS = {
+    "delivered": r"\b(deliver\w*|kept|met|achiev\w*|reached|fulfill\w*)\b",
+    "delivered_late": r"\b(late|after the (?:deadline|due date)|delayed)\b",
+    "partly_delivered": r"\b(partly|partially|part of|fell short)\b",
+    "not_delivered": r"\b(not deliver\w*|did not|didn't|missed|fell short|failed)\b",
+    "walked_back": r"\b(walk\w* back|withdr\w*|retract\w*|delay\w*|lowered)\b",
+    "too_early": r"\b(too early|not (?:yet )?due|not resolved yet|still open)\b",
+    "cannot_determine": r"\b(cannot (?:be )?determin\w*|could not (?:be )?determin\w*|"
+    r"not enough evidence|unclear)\b",
+}
+NOT_SCORED = re.compile(
+    r"\b(vague|not scored|never scored|cannot be (?:judged|scored|checked)|no (?:checkable |"
+    r"specific )?(?:target|deadline))\b",
+    re.IGNORECASE,
+)
+TOO_FEW = re.compile(r"\btoo few\b", re.IGNORECASE)
 ANALYST_WORDS = re.compile(
     r"\b(analysts?|IDC|Counterpoint|estimates?|consensus|Wall Street|research firm|forecasters?)\b",
     re.IGNORECASE,
@@ -124,7 +140,9 @@ ANALYST_WORDS = re.compile(
 
 class Fact(BaseModel):
     kind: (
-        str  # actual, derived, guidance, no_guidance, text, statement, no_management_claims, refuse
+        # actual, derived, guidance, no_guidance, text, statement, no_management_claims,
+        # promise, not_scored, track_record, refuse
+        str
     )
     ticker: str | None = None
     metric: str | None = None
@@ -151,6 +169,9 @@ class Fact(BaseModel):
     comparison: str | None = None
     # no_management_claims: a figure only an analyst gave
     analyst_figure: float | None = None
+    # promise, not_scored, track_record: the claim's speaker and words of its subject
+    speaker: str | None = None
+    subject: str | None = None
     # refuse
     advice_note: bool = False
 
@@ -258,6 +279,10 @@ async def check_fact(session: AsyncSession, fact: Fact, result: RunResult) -> tu
         if ok and fact.advice_note and ADVICE_NOTE.lower() not in answer.lower():
             return False, "no 'not investment advice' note"
         return ok, "" if ok else "did not decline"
+    if fact.kind in ("promise", "not_scored"):
+        return await _check_promise(session, fact, result, answer)
+    if fact.kind == "track_record":
+        return await _check_track_record(session, fact, answer)
     assert fact.ticker is not None
     if fact.kind == "actual":
         assert fact.metric and fact.period
@@ -383,6 +408,57 @@ async def _check_statement(
     if articles is None:
         problems.append("no news article cited")
     return not problems, "; ".join(problems)
+
+
+async def _promise_rows(session: AsyncSession, fact: Fact) -> list[Any]:
+    from talk_is_cheap.promises.queries import promise_rows
+
+    rows = await promise_rows(session, fact.ticker, speaker=fact.speaker)
+    wanted = (fact.subject or "").casefold()
+    return [r for r in rows if wanted in f"{r.promise.subject} {r.promise.quote}".casefold()]
+
+
+async def _check_promise(
+    session: AsyncSession, fact: Fact, result: RunResult, answer: str
+) -> tuple[bool, str]:
+    """A promise: the answer gives its verdict as stored (a review's first), says it is
+    too early when it is open, and cites the article; a vague claim (`not_scored`) is
+    said to be unscorable and gets no verdict."""
+    rows = await _promise_rows(session, fact)
+    if not rows:
+        return False, f"no stored promise for {fact.ticker} {fact.subject!r}"
+    problems = []
+    if fact.kind == "not_scored":
+        if not all(r.promise.specificity == "vague" for r in rows):
+            return False, "the labeled claim is not vague in the database"
+        if not NOT_SCORED.search(answer):
+            problems.append("does not say the claim cannot be scored")
+        if re.search(r"\b(was|were) (?:delivered|not delivered|kept)\b", answer, re.IGNORECASE):
+            problems.append("gives a vague claim a verdict")
+    else:
+        verdicts = {r.effective or "too_early" for r in rows if r.promise.specificity != "vague"}
+        if not any(re.search(PROMISE_VERDICT_WORDS[v], answer, re.IGNORECASE) for v in verdicts):
+            problems.append(f"verdict ({', '.join(sorted(verdicts))}) not stated")
+    if "reported by" not in result.answer.lower():
+        problems.append('no "reported by"')
+    cited = {src["url"] for src in result.sources}
+    if await session.scalar(select(Article.id).where(Article.url.in_(cited)).limit(1)) is None:
+        problems.append("no news article cited")
+    return not problems, "; ".join(problems)
+
+
+async def _check_track_record(session: AsyncSession, fact: Fact, answer: str) -> tuple[bool, str]:
+    from talk_is_cheap.promises.track import company_track_records
+
+    records = await company_track_records(session, ticker=fact.ticker, speaker=fact.speaker)
+    if not records:
+        return False, "no track record stored"
+    if any(r.enough for r in records):
+        rates = [r.on_time_rate for r in records if r.on_time_rate is not None]
+        ok = any(_states(answer, Decimal(str(rate * 100)), Decimal("0.01")) for rate in rates)
+        return ok, "" if ok else "no on-time rate stated"
+    ok = bool(TOO_FEW.search(answer))
+    return ok, "" if ok else 'does not say "too few to judge"'
 
 
 async def _guidance_row(session: AsyncSession, fact: Fact) -> Guidance | None:
@@ -566,6 +642,15 @@ def dry_run_script(question: SmokeQuestion) -> Any:
                 )
             elif fact.kind == "no_management_claims":
                 calls.append(("get_statements", {"ticker": fact.ticker, "management_only": False}))
+            elif fact.kind in ("promise", "not_scored"):
+                arguments = {"ticker": fact.ticker, "limit": 15}
+                if fact.speaker:
+                    arguments["speaker"] = fact.speaker
+                if fact.subject:
+                    arguments["query"] = fact.subject
+                calls.append(("get_promises", arguments))
+            elif fact.kind == "track_record":
+                calls.append(("get_track_record", {"ticker": fact.ticker, "speaker": fact.speaker}))
             elif fact.kind == "text":
                 calls.append(
                     (
@@ -643,6 +728,12 @@ def _find(items: Sequence[dict[str, Any]], ticker: str | None, ref: Mapping[str,
 
 def _draft_line(item: Mapping[str, Any], question: SmokeQuestion) -> str:
     marker = f"[{item['id']}]"
+    if "rule" in item:
+        return _promise_line(item, marker, question)
+    if "group" in item:
+        if item.get("judgment"):
+            return f"For {item['group']} there are {item['judgment']} {marker}."
+        return f"{item['group']} delivered {item['on_time_rate_pct']}% on time {marker}."
     if "claim_type" in item:
         return _statement_line(item, marker)
     if "operation" in item:
@@ -698,6 +789,23 @@ def _statement_line(item: Mapping[str, Any], marker: str) -> str:
     elif comparison == "no_formal_guidance":
         line += f" There is no formal guidance for that period {marker}."
     return line
+
+
+def _promise_line(item: Mapping[str, Any], marker: str, question: SmokeQuestion) -> str:
+    wanted = [f.subject.casefold() for f in question.facts if f.subject]
+    text = f"{item['subject']} {item['quote']}".casefold()
+    if wanted and not any(w in text for w in wanted):
+        return ""
+    said = (
+        f'On {item["date"]}, {item["speaker"]} said: "{item["quote"]}" '
+        f"(reported by {item['publisher']}) {marker}."
+    )
+    if item.get("scored") is False:
+        return f"{said} The claim is vague, so it is not scored {marker}."
+    verdict = item.get("verdict")
+    if verdict in (None, "too_early"):
+        return f"{said} It is too early to judge {marker}."
+    return f"{said} The verdict is {str(verdict).replace('_', ' ')} {marker}."
 
 
 def _figure(value: Any, unit: str) -> str:

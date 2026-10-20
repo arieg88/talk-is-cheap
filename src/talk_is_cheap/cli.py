@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from talk_is_cheap import __version__
 from talk_is_cheap.config import get_settings
 from talk_is_cheap.db import check_database, create_engine, create_session_factory
+from talk_is_cheap.db.models import PROMISE_VERDICTS
 from talk_is_cheap.edgar.fiscal import FiscalQuarter
 from talk_is_cheap.edgar.ingest import CompanyIngestResult, ingest_edgar
 from talk_is_cheap.edgar.source import EdgartoolsSource, configure_edgartools
@@ -1669,6 +1670,17 @@ def build_parser() -> argparse.ArgumentParser:
     statements_eval.add_argument(
         "--details", action="store_true", help="every leak, miss, extra and field error"
     )
+    promises_eval = benchmarks.add_parser(
+        "promises",
+        help="framing accuracy and verdict agreement on evals/promises/*_labels.jsonl",
+    )
+    promises_eval.add_argument(
+        "--labels-dir", type=Path, default=Path("evals/promises"), help="labels directory"
+    )
+    promises_eval.add_argument(
+        "--dry-run", action="store_true", help="print the calls and cost, and make no call"
+    )
+    promises_eval.add_argument("--details", action="store_true", help="every disagreement")
     agent_eval = benchmarks.add_parser(
         "agent", help="the agent's smoke set: facts, citations, grounding and refusals"
     )
@@ -1817,6 +1829,46 @@ def build_parser() -> argparse.ArgumentParser:
         "--wrong", action="store_true", help="with `review`: the claim is wrong; leave it out"
     )
 
+    promised = commands.add_parser(
+        "promises",
+        help="management's promises made resolvable and judged: `promises frame`, `promises "
+        "resolve`, `promises NVDA`, `promises show ID`, `promises review ID --verdict V`, "
+        "`promises track-record`",
+    )
+    promised.add_argument(
+        "action", help="frame, resolve, show, review, track-record, a ticker, or `all`"
+    )
+    promised.add_argument("row", nargs="?", help="with `show` and `review`: a promise ID")
+    promised.add_argument("--tickers", type=_tickers, help=_TICKERS_HELP)
+    promised.add_argument("--limit", type=int, help="at most this many claims per company")
+    promised.add_argument("--model", help="model of the configured provider (default LLM_MODEL)")
+    promised.add_argument(
+        "--dry-run", action="store_true", help="print the calls and cost, and make no call"
+    )
+    promised.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="with `frame`: only claims without a promise of any version",
+    )
+    promised.add_argument(
+        "--due-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="with `resolve`: only claims whose due date and grace period have passed "
+        "(default; --no-due-only resolves every scorable claim)",
+    )
+    promised.add_argument("--verdict", choices=PROMISE_VERDICTS, help="filter, or the review's")
+    promised.add_argument("--open", action="store_true", help="only claims not settled yet")
+    promised.add_argument("--bold", action="store_true", help="only bold claims")
+    promised.add_argument("--note", help="with `review`: why")
+    promised.add_argument(
+        "--by", choices=("executive", "company"), default="executive", help="track-record groups"
+    )
+    promised.add_argument("--ticker", help="with `track-record`: one company")
+    promised.add_argument(
+        "--specific-only", action="store_true", help="with `track-record`: only specific claims"
+    )
+
     covered = commands.add_parser(
         "coverage", help="documents and sections found per company and fiscal quarter"
     )
@@ -1936,6 +1988,10 @@ def _run(args: argparse.Namespace) -> int:
                     args.results,
                 )
             )  # fmt: skip
+        case "eval" if args.benchmark == "promises":
+            from talk_is_cheap.promises.commands import eval_command as eval_promises
+
+            return asyncio.run(eval_promises(args.labels_dir, args.dry_run, args.details))
         case "eval" if args.benchmark == "statements":
             from talk_is_cheap.statements.commands import eval_command
 
@@ -1989,6 +2045,8 @@ def _run(args: argparse.Namespace) -> int:
                     args.summary, args.limit,
                 )
             )  # fmt: skip
+        case "promises":
+            return _promises(args)
         case "feeds":
             return asyncio.run(_feeds(args.backfill))
         case "news":
@@ -2002,6 +2060,38 @@ def _run(args: argparse.Namespace) -> int:
                 )
             )
     return 2  # unreachable: argparse rejects unknown commands
+
+
+def _promises(args: argparse.Namespace) -> int:
+    from talk_is_cheap.promises import commands
+
+    action = args.action
+    if args.row is not None and action not in ("show", "review"):
+        print("a promise ID only goes with `promises show` and `promises review`", file=sys.stderr)
+        return 2
+    match action:
+        case "frame":
+            return asyncio.run(
+                commands.frame_command(
+                    args.tickers, args.limit, args.dry_run, args.missing_only, args.model
+                )
+            )
+        case "resolve":
+            return asyncio.run(
+                commands.resolve_command(
+                    args.tickers, args.limit, args.dry_run, args.due_only, args.model
+                )
+            )
+        case "show":
+            if args.row is None:
+                print("usage: talk-is-cheap promises show ID", file=sys.stderr)
+                return 2
+            return asyncio.run(commands.show_command(args.row))
+        case "review":
+            return asyncio.run(commands.review_command(args.row or "", args.verdict, args.note))
+        case "track-record":
+            return asyncio.run(commands.track_command(args.by, args.ticker, args.specific_only))
+    return asyncio.run(commands.list_command(action, args.verdict, args.open, args.bold))
 
 
 if __name__ == "__main__":

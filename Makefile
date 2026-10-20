@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install db db-down db-reset migrate db-check ingest index extract eval-retrieval eval-guidance eval-statements smoke-agent agent-graph lint format typecheck test test-unit check
+.PHONY: help install db db-down db-reset migrate db-check ingest index extract eval-retrieval eval-guidance eval-statements eval-promises smoke-agent agent-graph lint format typecheck test test-unit check
 
 help: ## List available commands
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -46,6 +46,9 @@ eval-guidance: ## Precision, recall, figures and periods of guidance extraction 
 
 eval-statements: ## Claim recall and precision, attribution precision and field accuracy of statement extraction (LLM_MODEL) on evals/statements/labels.jsonl. ARGS=--dry-run spends nothing
 	uv run talk-is-cheap eval statements --details $(ARGS)
+
+eval-promises: ## Framing accuracy, verdict agreement and the false "delivered" rate of the promise tracker (LLM_MODEL) on evals/promises/. ARGS=--dry-run spends nothing
+	uv run talk-is-cheap eval promises --details $(ARGS)
 
 smoke-agent: ## Run the agent's smoke set (evals/agent/smoke.jsonl): estimate, scores, cost. ARGS=--dry-run spends nothing
 	uv run talk-is-cheap eval agent $(ARGS)

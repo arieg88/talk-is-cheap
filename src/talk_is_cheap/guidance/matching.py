@@ -179,6 +179,10 @@ class Actuals:
     def period_reported(self, period: Period) -> bool:
         return period in self._reported
 
+    def periods(self) -> list[Period]:
+        """Every reported period, newest first, a year after its fourth quarter."""
+        return sorted(self._reported, key=lambda p: (p[0], p[1] or 5), reverse=True)
+
 
 def load_split_config() -> list[ConfiguredSplit]:
     text = files("talk_is_cheap.guidance").joinpath("splits.yaml").read_text(encoding="utf-8")

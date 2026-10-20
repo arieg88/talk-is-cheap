@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from importlib import import_module
+from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -84,6 +85,21 @@ def estimate_usage(prompt: str) -> Usage:
     input_tokens = INPUT_OVERHEAD_TOKENS + math.ceil(len(prompt) / CHARS_PER_TOKEN)
     output = OUTPUT_TOKENS_PER_CALL + int(input_tokens * OUTPUT_TOKENS_PER_INPUT_TOKEN)
     return Usage(input_tokens, min(output, MAX_OUTPUT_TOKENS))
+
+
+def bounded_usage(prompt: str, overhead_tokens: int, max_output_tokens: int) -> Usage:
+    """The largest usage a call can have: its input, estimated generously from the
+    prompt and the tokens of instructions and schema beyond it, and its output limit."""
+    return Usage(overhead_tokens + math.ceil(len(prompt) / CHARS_PER_TOKEN), max_output_tokens)
+
+
+def load_prompt_file(name: str, version: str) -> str:
+    """A versioned prompt: `prompts/<name>/<version>.md`."""
+    return (
+        files("talk_is_cheap")
+        .joinpath("prompts", name, f"{version}.md")
+        .read_text(encoding="utf-8")
+    )
 
 
 class LlmError(RuntimeError):

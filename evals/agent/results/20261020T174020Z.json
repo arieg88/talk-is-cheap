@@ -1,0 +1,245 @@
+{
+ "run_at": "20261020T174020Z",
+ "model": "claude-haiku-5-5@low",
+ "dry_run": false,
+ "questions": 14,
+ "cost": 0.0691763,
+ "scores": [
+  {
+   "id": "news-qcom-vs-guidance",
+   "type": "guidance_check",
+   "question": "Did Qualcomm say anything between releases that differed from its formal guidance?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 2,
+   "llm_calls": 7,
+   "cached_calls": 0,
+   "cost": 0.0120997,
+   "seconds": 27.0,
+   "revisions": 2,
+   "verifier_failures": {
+    "llm_unsupported": 4
+   },
+   "failure_details": [
+    "0 llm_unsupported: CEO Cristiano Amon reportedly said prices would rise from September.: No citation given; the sentence is unfinished and cites no evidence.",
+    "1 llm_unsupported: Qualcomm's news-reported comments mostly matched its formal guidance.: Evidence shows no matching overall assessment; comparisons are mostly not_comparable or no_formal_guidance.",
+    "1 llm_unsupported: Reported comment that Q4 adjusted earnings would be below Wall Street expectations was excluded as wrong.: Cited item shows it was reviewed as wrong and left out, but the claim's wording is an exclusi",
+    "2 llm_unsupported: Q4 revenue comment ($9.7B to $10.5B) matched formal guidance issued July 29.: Revenue comparison is marked pending, not consistent."
+   ],
+   "answer": "Two of Qualcomm's news-reported numeric comments were checked against formal guidance and matched it. The rest could not be compared. - **Matched:** Reported comments on fourth-quarter adjusted EPS ($2.05 to $2.25) and revenue ($9.7 billion to $10.5 billion) were marked consistent with the formal guidance issued July 29 (reported by finance.yahoo.com) [1][2]. - **Apple modem decline:** Qualcomm reportedly said Apple-modem revenue would decline faster than previously expected, starting in its fiscal fourth quarter (reported by finance.yahoo.com) [3]. The earnings call reportedly described an \"acceleration\" in the Apple revenue dip (reported by theverge.com) [4]. The formal release gives only segment ranges: QCT revenue of $8.4 billion to $9.0 billion and QTL revenue of $1.2 billion to $1.4 billion [2]. None is Apple-specific, so there is no formal figure to compare these comments against. - **Other directional comments:** Reported comments included non-handset growth offsetting Apple losses, FY2027 top-line growth, and a $5 billion AI data center revenue goal by fiscal 2027 and $15 billion by fiscal 2029 (reported by finance.yahoo.com) [3][5]. None has a formal figure to compare against. - **Price increases:** CEO Cristiano Amon reportedly said product prices \"are going to go up\" starting September 1 (reported by theverge.com) [6]. No formal guidance covers prices. - **Q4 earnings comment:** A reported comment that fourth-quarter adjusted earnings would fall below Wall Street expectations is marked by the tool as \"reviewed as wrong\" and left out of the outcome counts (reported by finance.yahoo.com) [3]. The statement list has 10 more claims that I did not retrieve, so this covers only the claims shown.\n\nSources:\n[1] finance.yahoo.com, 2026-07-31: company statement on 2026-07-31 (reported by finance.yahoo.com): https://finance.yahoo.com/markets/stocks/articles/qualcomm-shares-fall-fourth-quarter-103008272.html\n[2] QCOM earnings release for FY2026Q3, filed 2026-07-29: https://www.sec.gov/Archives/edgar/data/804328/000080432826000085/qcom062826erex991.htm\n[3] finance.yahoo.com, 2026-07-30: company statement on 2026-07-30 (reported by finance.yahoo.com): https://finance.yahoo.com/markets/stocks/articles/qualcomm-huge-news-apple-123650717.html\n[4] theverge.com, 2026-07-29: company statement on 2026-07-29 (reported by theverge.com): https://www.theverge.com/tech/972894/qualcomm-price-hikes-q2-2026-earnings\n[5] finance.yahoo.com, 2026-08-09: Cristiano Amon on 2026-07-29 (reported by finance.yahoo.com): https://finance.yahoo.com/markets/stocks/articles/qualcomm-qcom-q3-2026-earnings-235848089.html\n[6] theverge.com, 2026-07-29: Cristiano Amon on 2026-07-29 (reported by theverge.com): https://www.theverge.com/tech/972894/qualcomm-price-hikes-q2-2026-earnings",
+   "error": null,
+   "passed": true
+  },
+  {
+   "id": "news-meta-capex-2025",
+   "type": "guidance_check",
+   "question": "What did Meta's executives say about 2025 capex, and how did actual capex compare?",
+   "routed_as": "guidance_check",
+   "facts": 0.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [
+    "does not say management made no such claim",
+    "verdict beat not stated"
+   ],
+   "tool_calls": 4,
+   "llm_calls": 9,
+   "cached_calls": 0,
+   "cost": 0.007164999999999999,
+   "seconds": 19.7,
+   "revisions": 2,
+   "verifier_failures": {
+    "numbers_cited": 1,
+    "llm_unsupported": 2
+   },
+   "failure_details": [
+    "0 numbers_cited: a sentence with a number has no citation: That $72.2 billion figure does not match the latest 10-K capex line of $69.7 billion, so the two numbers are on different bases or have been revised.",
+    "1 llm_unsupported: Filings searched do not explain the difference: Cited evidence does not state what filings were searched; claim about search is not in E1, E9, or E10",
+    "1 llm_unsupported: No management statements about 2025 capex turned up in stored news: No news item is cited; claim about absence of news has no evidence"
+   ],
+   "answer": "Meta's formal 2025 capex guidance was raised several times during the year. The Q3 2025 release gave the latest range: \"We currently expect 2025 capital expenditures, including principal payments on finance leases, to be in the range of $70-72 billion, increased from our prior outlook of $66-72 billion\" [1]. Earlier ranges were $64-72 billion in Q1 [2], $66-72 billion in Q2 [3], and $60-65 billion in the January 2025 release [4].\nThe actual figure in the FY2025 10-K is $69,691M [5]. That is $309M below the low end of the final $70-72 billion range [1][5]. The guidance tool compared the ranges against a first-reported actual of $72,215M [1], so the figure the guidance was judged against ($72.2 billion) differs from the $69.7 billion in the latest 10-K [1][5].\n\nSources:\n[1] META earnings release for FY2025Q3, filed 2025-10-29: https://www.sec.gov/Archives/edgar/data/1326801/000162828025047114/meta-09302025xexhibit991.htm\n[2] META earnings release for FY2025Q1, filed 2025-04-30: https://www.sec.gov/Archives/edgar/data/1326801/000132680125000050/meta-03312025xexhibit991.htm\n[3] META earnings release for FY2025Q2, filed 2025-07-30: https://www.sec.gov/Archives/edgar/data/1326801/000162828025036719/meta-06302025xexhibit991.htm\n[4] META earnings release for FY2024Q4, filed 2025-01-29: https://www.sec.gov/Archives/edgar/data/1326801/000132680125000014/meta-12312024xexhibit991.htm\n[5] META 10-K filed 2026-01-29: https://www.sec.gov/Archives/edgar/data/1326801/000162828026003942/meta-20251231.htm",
+   "error": null,
+   "passed": false
+  },
+  {
+   "id": "news-nvda-q2fy25-revenue",
+   "type": "guidance_check",
+   "question": "In May 2024, what did Nvidia say it expected for revenue in the following quarter, as reported in the news, and how did the result compare?",
+   "routed_as": "guidance_check",
+   "facts": 0.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [
+    "no \"reported by\"; no news article cited"
+   ],
+   "tool_calls": 2,
+   "llm_calls": 6,
+   "cached_calls": 0,
+   "cost": 0.0059073,
+   "seconds": 15.5,
+   "revisions": 2,
+   "verifier_failures": {
+    "numbers_grounded": 1,
+    "llm_prefer_primary": 3
+   },
+   "failure_details": [
+    "0 numbers_grounded: '\u201323' is in no evidence: Nvidia said it expected second-quarter revenue of about $28 billion, plus or minus 2%, which Fortune and Yahoo Finance reported on May 22\u201323, 2024 [E10][E11].",
+    "1 llm_prefer_primary: Nvidia told investors on May 22, 2024 it expected second-quarter revenue of about $28 billion, plus or minus 2%.: Cited news item E10 gives about $28 billion; primary E1 gives the \u00b12% range too.",
+    "2 llm_prefer_primary: Fortune reported the same day Q2 revenue would be about $28B.: Fortune is news; the press release E1 states the same figure.",
+    "2 llm_prefer_primary: Yahoo Finance reported guidance as $28B plus or minus 2%.: Yahoo is news; the press release E1 gives the same guidance."
+   ],
+   "answer": "Nvidia's earnings release, dated May 22, 2024, said it expected second-quarter revenue of $28.0 billion, plus or minus 2%, a range of $27.44 billion to $28.56 billion [1]. The actual result was $30.04 billion, which beat the $28.0 billion point guidance by $2.04 billion [1].\nLeft out because they could not be verified (cited only from news): 2 statements.\n\nSources:\n[1] NVDA earnings release for FY2025Q1, filed 2024-05-22: https://www.sec.gov/Archives/edgar/data/1045810/000104581024000113/q1fy25pr.htm",
+   "error": null,
+   "passed": false
+  },
+  {
+   "id": "news-nvda-q2fy27-revenue",
+   "type": "guidance_check",
+   "question": "What revenue did Nvidia say in June 2026 that it expected for its fiscal second quarter of 2027, and did it hit that figure?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 5,
+   "llm_calls": 8,
+   "cached_calls": 0,
+   "cost": 0.0065027,
+   "seconds": 18.9,
+   "revisions": 2,
+   "verifier_failures": {
+    "llm_prefer_primary": 3,
+    "llm_unsupported": 1
+   },
+   "failure_details": [
+    "0 llm_prefer_primary: A June 5, 2026 Yahoo report quoted Nvidia expecting about $91 billion.: Cites only a news report; the press release E1 gives the same figure.",
+    "0 llm_unsupported: Actual revenue was $5.2 billion above the guidance point, a 5.7% beat.: Cited E1 is guidance; the $5.2B and 5.7% figures are derived from actual, which E1 reports as 96,221M in its beat fields, so the",
+    "1 llm_prefer_primary: A June 5, 2026 Yahoo Finance report quoted about $91 billion expectation: Cites only news report E4; the press release E1 gives the same figure.",
+    "2 llm_prefer_primary: Yahoo Finance reported on June 5, 2026 that the company expected about $91 billion.: Cites only news item E4; the May 20 release E1 gives the same figure."
+   ],
+   "answer": "Nvidia's May 20, 2026 earnings release guided fiscal Q2 2027 revenue to $91.0 billion, plus or minus 2%, not assuming any Data Center compute revenue from China [1]. The June date is the article's date, not a confirmed statement date (reported by finance.yahoo.com) [2]. Nvidia hit the figure and exceeded it. Revenue for the quarter ended July 26, 2026 was $96,221M, per the 10-Q filed August 26, 2026 [3]. That is $5,221M above the $91.0 billion guidance point [1][3], a 5.74% beat [1][3].\nLeft out because they could not be verified (cited only from news): one statement.\n\nSources:\n[1] NVDA earnings release for FY2027Q1, filed 2026-05-20: https://www.sec.gov/Archives/edgar/data/1045810/000104581026000051/q1fy27pr.htm\n[2] finance.yahoo.com, 2026-06-05: company statement on 2026-06-05 (reported by finance.yahoo.com): https://finance.yahoo.com/markets/stocks/articles/still-plenty-time-invest-nvidia-143953329.html\n[3] NVDA 10-Q filed 2026-08-26: https://www.sec.gov/Archives/edgar/data/1045810/000104581026000075/nvda-20260726.htm",
+   "error": null,
+   "passed": true
+  },
+  {
+   "id": "news-tsla-capex-2026",
+   "type": "guidance_check",
+   "question": "What has Tesla said in the news about its capital expenditures for 2026?",
+   "routed_as": "lookup",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 2,
+   "llm_calls": 4,
+   "cached_calls": 0,
+   "cost": 0.0021171000000000002,
+   "seconds": 6.9,
+   "revisions": 0,
+   "verifier_failures": {},
+   "failure_details": [],
+   "answer": "Tesla's earnings releases contain no capital expenditure guidance. None of the 11 checked, through FY2026Q2, includes any [1].\nThe only statement I found is in a news report. Fool.com reported on October 2, 2026 that Tesla expects capital expenditures of over $25 billion in 2026, due to its AI initiatives (reported by fool.com) [2]. The article does not say who made the statement or where, so I can only attribute it to the company. The claim is pending, since the 2026 period has not been reported yet, and no formal capex guidance was issued within 45 days of it (reported by fool.com) [2].\n\nSources:\n[1] TSLA earnings release FY2026Q2: https://www.sec.gov/Archives/edgar/data/1318605/000162828026049213/exhibit991.htm\n[2] fool.com, 2026-10-02: company statement on 2026-10-02 (reported by fool.com): https://www.fool.com/investing/2026/10/01/tesla-is-the-only-magnificent-seven-stock-in-the-red-for-2026/",
+   "error": null,
+   "passed": true
+  },
+  {
+   "id": "news-crm-fy2030-target",
+   "type": "guidance_check",
+   "question": "What revenue target has Salesforce given for fiscal 2030, and is it part of its formal guidance?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 2,
+   "llm_calls": 6,
+   "cached_calls": 0,
+   "cost": 0.0046247,
+   "seconds": 14.2,
+   "revisions": 2,
+   "verifier_failures": {
+    "numbers_cited": 1,
+    "llm_unsupported": 4,
+    "llm_prefer_primary": 1
+   },
+   "failure_details": [
+    "0 numbers_cited: a sentence with a number has no citation: Salesforce's target is revenue of $63 billion for fiscal 2030.",
+    "1 llm_unsupported: The target is part of the formal guidance in the earnings release [E3].: E3 gives no guidance verdict; it marks target pending, not formal guidance",
+    "1 llm_unsupported: The earnings-release row [E3] is the formal record.: E3 does not state it is the formal guidance record",
+    "2 llm_prefer_primary: CNBC reported a fiscal 2030 forecast of over $63 billion [E2].: Only a news report; the press release E3 gives the same figure.",
+    "2 llm_unsupported: Trefis reported that executives set the target in September [E1].: Trefis article dated October 13; it does not date the statement itself.",
+    "2 llm_unsupported: The September date in those reports conflicts with the February release date in [E3].: The September date is from Trefis, which E1 says does not date the statement; no real conflict is shown with E3's"
+   ],
+   "answer": "Salesforce's target is revenue of $63 billion for fiscal 2030 [1]. The Q4 FY2026 earnings release, dated February 25, 2026, says it \"raises full year FY30 revenue target to $63 billion including Informatica\" [1]. The basis is not stated, and the verdict is pending because FY2030 has not been reported [1]. News reports describe the figure differently. Both are marked as having no formal guidance issued within 45 days of the statement (reported by CNBC, trefis.com) [2][3].\nLeft out because they could not be verified (cited only from news, not supported by the cited evidence): 3 statements.\n\nSources:\n[1] CRM earnings release for FY2026Q4, filed 2026-02-25: https://www.sec.gov/Archives/edgar/data/1108524/000110852426000056/crm-q4fy26xexhibit991.htm\n[2] trefis.com, 2026-10-13: company statement on 2026-10-13 (reported by trefis.com): https://www.trefis.com/articles/618505/what-would-it-take-for-salesforce-stock-to-move-higher/2026-10-13\n[3] CNBC, 2026-09-16: company statement on 2026-09-16 (reported by CNBC): https://www.cnbc.com/2026/09/16/salesforce-issues-revenue-target-of-63-billion-for-fiscal-2030.html",
+   "error": null,
+   "passed": true
+  },
+  {
+   "id": "news-amzn-jassy-capex",
+   "type": "lookup",
+   "question": "What did Andy Jassy say about Amazon's capital spending for 2026?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 5,
+   "llm_calls": 11,
+   "cached_calls": 0,
+   "cost": 0.0094848,
+   "seconds": 32.4,
+   "revisions": 2,
+   "verifier_failures": {
+    "llm_prefer_primary": 3,
+    "llm_unsupported": 1
+   },
+   "failure_details": [
+    "0 llm_prefer_primary: Prior estimate was $200B, raised due to higher memory costs, as reported by Fortune: Only a news report cited; no primary source gives the figure",
+    "0 llm_unsupported: The outcome is pending because the target period has not yet been reported: E1 says pending, but E1 is a news item; the reason given is not a verdict cause stated for pending status beyond target peri",
+    "1 llm_prefer_primary: Prior estimate was $200B, raised due to higher memory costs, as reported by Fortune [E1]: Only news report cited; no filing gives this figure.",
+    "2 llm_prefer_primary: The $220B figure rests only on Fortune's report: Only news item cited; no filing states the figure, so not a primary-source conflict."
+   ],
+   "answer": "Andy Jassy said on the July 30, 2026 earnings call that Amazon now expects to spend $220 billion in capital expenditures in 2026, due to higher memory costs, as reported by Fortune [1]. I could not confirm this figure in Amazon's own filings. The Q2 2026 earnings release and 10-Q excerpts I retrieved do not state a 2026 capex figure [2][3][4]. Amazon's earnings releases give no capex guidance for 2026 [5], so the $220 billion figure is what Jassy said on the call, not formal guidance [1]. The claim's verdict is pending, and the tool gives the reason as \"target period not reported yet\" (reported by fortune.com) [1].\nLeft out because they could not be verified (cited only from news): one statement.\n\nSources:\n[1] fortune.com, 2026-07-31: Andy Jassy on 2026-07-30 (reported by fortune.com): https://fortune.com/2026/07/31/tim-cook-takes-final-earnings-call-apple-feels-the-supply-pain/\n[2] AMZN earnings release FY2026Q2, Exhibit 99.1 / AMAZON.COM ANNOUNCES SECOND QUARTER RESULTS, characters 1581-3306: https://www.sec.gov/Archives/edgar/data/1018724/000101872426000024/amzn-20260630xex991.htm\n[3] AMZN 10-Q FY2026Q2, Item 2. Management\u2019s Discussion and Analysis of Financial Condition and Results of Operations, characters 94489-96378: https://www.sec.gov/Archives/edgar/data/1018724/000101872426000026/amzn-20260630.htm\n[4] AMZN earnings release FY2026Q2, Exhibit 99.1 / AMAZON.COM ANNOUNCES SECOND QUARTER RESULTS, characters 0-1720: https://www.sec.gov/Archives/edgar/data/1018724/000101872426000024/amzn-20260630xex991.htm\n[5] AMZN earnings release FY2026Q2: https://www.sec.gov/Archives/edgar/data/1018724/000101872426000024/amzn-20260630xex991.htm",
+   "error": null,
+   "passed": true
+  },
+  {
+   "id": "news-aapl-duo-analyst-only",
+   "type": "lookup",
+   "question": "What did Apple's executives say about how fast iPhone Duo shipments will grow next year?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 7,
+   "llm_calls": 7,
+   "cached_calls": 0,
+   "cost": 0.0101415,
+   "seconds": 20.4,
+   "revisions": 2,
+   "verifier_failures": {
+    "numbers_cited": 3
+   },
+   "failure_details": [
+    "0 numbers_cited: a sentence with a number has no citation: Apple's only formal forward figure in these results is total company revenue growth of 9% to 11% for the September quarter, which is not specific to Duo [E10,",
+    "1 numbers_cited: a sentence with a number has no citation: The only forward figure I found is news-reported total company revenue growth of 9%-11% for the September quarter, or $111.7 billion to $113.7 billion, which ",
+    "2 numbers_cited: a sentence with a number has no citation: The only forward figures I found are news-reported total company revenue growth of 9% [E24, reported by finance.yahoo.com] to 11% [E10, reported by finance.ya"
+   ],
+   "answer": "Apple's executives have not been found saying how fast iPhone Duo shipments will grow next year. The statement search returned no such quote, and the filings search returned no Duo passage [1][2][3][4][5][6]. The news reports I found cover pre-orders and delivery timing, not growth. Pre-orders reportedly sold out, and delivery dates moved from October 23 into late January [E8, reported by fool.com]. CBS News and Bloomberg headlines say Duo orders are backordered or slipping into 2027 [E17, reported by CBS News; E19, reported by Bloomberg.com]. I have only the headlines, not the full articles, and none gives a growth rate for next year. Apple's earnings releases contain no guidance at all [7]. These are not specific to Duo.\nLeft out because they could not be verified (a figure without a source): one statement.\n\nSources:\n[1] AAPL earnings release FY2025Q2, Exhibit 99.1 / Apple reports second quarter results / Services revenue reaches new all-time high / EPS sets March quarter record, characters 0-1833: https://www.sec.gov/Archives/edgar/data/320193/000032019325000055/a8-kex991q2202503292025.htm\n[2] AAPL earnings release FY2024Q1, Exhibit 99.1 / Apple reports first quarter results / Services revenue reaches new all-time record / EPS up 16 percent to new all-time high, characters 0-1808: https://www.sec.gov/Archives/edgar/data/320193/000032019324000005/a8-kex991q1202412302023.htm\n[3] AAPL earnings release FY2026Q2, Exhibit 99.1 / Apple reports second quarter results / March quarter records for total company revenue, iPhone revenue, and EPS / Services revenue reaches new all-time high, characters 0-1873: https://www.sec.gov/Archives/edgar/data/320193/000032019326000011/a8-kex991q2202603282026.htm\n[4] AAPL 10-Q FY2024Q1, Item 2. Management\u2019s Discussion and Analysis of Financial Condition and Results of Operations, characters 35104-36579: https://www.sec.gov/Archives/edgar/data/320193/000032019324000006/aapl-20231230.htm\n[5] AAPL 10-Q FY2025Q3, Item 2. Management\u2019s Discussion and Analysis of Financial Condition and Results of Operations, characters 38529-39614: https://www.sec.gov/Archives/edgar/data/320193/000032019325000073/aapl-20250628.htm\n[6] AAPL 10-Q FY2026Q2, Item 2. Management\u2019s Discussion and Analysis of Financial Condition and Results of Operations, characters 40775-42707: https://www.sec.gov/Archives/edgar/data/320193/000032019326000013/aapl-20260328.htm\n[7] AAPL earnings release FY2026Q3: https://www.sec.gov/Archives/edgar/data/320193/000032019326000018/a8-kex991q3202606272026.htm",
+   "error": null,
+   "passed": true
+  }
+ ]
+}

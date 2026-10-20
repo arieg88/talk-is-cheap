@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     # Every model response, so re-runs cost nothing.
     llm_cache_dir: Path = Path(".cache/llm")
 
+    # How long after a promise's due date its delivery still counts as on time: unset,
+    # until the company's first 10-Q or 10-K that covers the due period; a number of
+    # days, that many days after the due date.
+    promise_grace_days: int | None = Field(default=None, ge=0, le=730)
+
     @field_validator("database_url")
     @classmethod
     def _require_psycopg_driver(cls, value: str) -> str:
@@ -98,7 +103,12 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "llm_api_key", "llm_effort", "llm_input_price", "llm_output_price", mode="before"
+        "llm_api_key",
+        "llm_effort",
+        "llm_input_price",
+        "llm_output_price",
+        "promise_grace_days",
+        mode="before",
     )
     @classmethod
     def _empty_is_unset(cls, value: object) -> object:

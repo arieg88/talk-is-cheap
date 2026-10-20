@@ -161,6 +161,11 @@ at no cost.
 | `directional` | The target period's reported value against the period before it (quarter before quarter, year before year), as first reported: `confirmed`, `contradicted`, or `pending`; a change within the point tolerance (1% of an amount, 0.5 points of a rate) is flat. Not comparable: metric `other`, non-GAAP, a segment, the direction of a growth rate, an unresolved period |
 | `plan`, `qualitative` | `not_checkable`. A plan gets, as context, the best passage (MD&A or risk factors) of the 10-Qs and 10-Ks filed within 200 days after it, from the filing search the agent uses (`statements/context.py`) |
 
+Plans, qualitative claims and claims about anything XBRL does not report are judged by
+the promise tracker instead: every management claim except a numeric forecast with a
+verdict is framed into a resolution rule and resolved from later evidence
+([promises.md](promises.md)).
+
 Each numeric or directional management claim is then compared with formal guidance
 for the same metric, measure, segment and target period, issued within 45 days before or
 after the claim (a stated basis must agree; rows that need review or were reviewed as

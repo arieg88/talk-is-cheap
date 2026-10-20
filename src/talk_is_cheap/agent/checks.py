@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from talk_is_cheap.agent.evidence import Evidence
+from talk_is_cheap.agent.evidence import Evidence, is_derived
 
 CITATION = re.compile(r"\[(E\d+(?:\s*,\s*E\d+)*)\]")
 CITATION_ID = re.compile(r"E\d+")
@@ -54,7 +54,13 @@ _NOT_FIGURES = [
     re.compile(r"\[\d+(?:\s*,\s*\d+)*\]"),  # rendered citation markers
     re.compile(r"https?://\S+"),
     re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?Z?)?\b"),
-    re.compile(rf"\b{_MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*\d{{4}})?", re.IGNORECASE),
+    re.compile(
+        rf"\b{_MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?"  # a day
+        rf"(?:\s*[-\u2013]\s*\d{{1,2}})?\b"  # or a range of days ("May 22-23")
+        rf"(?:,\s*\d{{4}})?",
+        re.IGNORECASE,
+    ),
+    re.compile(rf"\b{_MONTHS}\s+\d{{4}}\b", re.IGNORECASE),
     re.compile(rf"\b\d{{1,2}}\s+{_MONTHS}(?:\s+\d{{4}})?", re.IGNORECASE),
     re.compile(r"\bFY\s?'?\d{2,4}(?:\s?Q[1-4])?\b", re.IGNORECASE),
     re.compile(r"\bQ[1-4](?:\s?(?:FY\s?)?'?\d{2,4})?\b", re.IGNORECASE),
@@ -223,7 +229,7 @@ def code_checks(draft: str, evidence: Mapping[str, Evidence], question: str = ""
         item = evidence.get(evidence_id)
         if item is None:
             failures.append(Failure("citations_exist", f"[{evidence_id}] is not an evidence id"))
-        elif not item["url"] and item["tool"] != "compute":
+        elif not item["url"] and not is_derived(item):
             failures.append(
                 Failure(
                     "citations_exist",

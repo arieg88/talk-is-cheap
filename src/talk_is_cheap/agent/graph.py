@@ -586,7 +586,7 @@ def _with_notes(text: str, evidence: Mapping[str, Evidence]) -> str:
         ids = cited_ids(sentence)
         items = [evidence[i] for i in ids if i in evidence]
         news = [i for i in items if i["provenance"] == "news_report"]
-        statements = any(i["tool"] == "get_statements" for i in news)
+        statements = any(i["tool"] in ("get_statements", "get_promises") for i in news)
         if items and len(news) == len(items) and (statements or _GUIDANCE_WORDS.search(sentence)):
             publishers = ", ".join(
                 sorted({str(i["data"].get("publisher") or "a news outlet") for i in news})
@@ -710,6 +710,13 @@ def source_label(item: Evidence) -> str:
         return (
             f"{publisher}, {data['published']}: {who} on {data['date']} (reported by {publisher})"
         )
+    if tool == "get_promises":
+        publisher = data.get("publisher") or "news"
+        return f"{publisher}: {data['speaker']} on {data['date']} (reported by {publisher})"
+    if tool == "promise_evidence":
+        return f"{data['kind']}, {data.get('date') or 'undated'}"
+    if tool == "cite_value":
+        return f"cited from {data['source']}"
     if tool == "resolve_company":
         return f"{data['ticker']} filings on SEC EDGAR"
     return str(tool)

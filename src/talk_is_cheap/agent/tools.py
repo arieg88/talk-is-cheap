@@ -25,6 +25,7 @@ from talk_is_cheap.agent.evidence import (
     EvidenceLog,
     Provenance,
     compact,
+    evidence_date,
     provenance_of,
 )
 from talk_is_cheap.db.models import (
@@ -85,7 +86,7 @@ GuidanceMetric = Literal[
     "tax_rate",
     "other",
 ]
-DocType = Literal["press_release", "earnings_exhibit", "10q", "10k"]
+DocType = Literal["press_release", "earnings_exhibit", "deliveries_report", "10q", "10k"]
 SectionType = Literal["outlook", "results", "commentary", "mdna", "risk_factors", "other"]
 Operation = Literal["pct_change", "difference", "ratio", "sum", "margin"]
 
@@ -181,14 +182,16 @@ class SearchFilingsInput(BaseModel):
     )
     doc_types: list[DocType] | None = None
     section_types: list[SectionType] | None = None
+    date_from: date | None = Field(default=None, description="filed on or after this day")
+    date_to: date | None = Field(default=None, description="filed on or before this day")
     k: int = Field(default=6, ge=1, le=10)
 
 
 class SearchNewsInput(BaseModel):
     query: str
     ticker: str | None = None
-    since: date | None = None
-    until: date | None = Field(default=None, description="inclusive")
+    date_from: date | None = Field(default=None, description="published on or after this day")
+    date_to: date | None = Field(default=None, description="published on or before this day")
     k: int = Field(default=6, ge=1, le=10)
 
 
@@ -209,7 +212,48 @@ class GetStatementsInput(BaseModel):
     checkable_only: bool = Field(
         default=False, description="only numeric forecasts and directional claims"
     )
+    date_from: date | None = Field(default=None, description="made on or after this day")
+    date_to: date | None = Field(default=None, description="made on or before this day")
     limit: int = Field(default=10, ge=1, le=20)
+
+
+PromiseVerdict = Literal[
+    "delivered",
+    "delivered_late",
+    "partly_delivered",
+    "not_delivered",
+    "walked_back",
+    "too_early",
+    "cannot_determine",
+]
+
+
+class GetPromisesInput(BaseModel):
+    ticker: str | None = None
+    query: str | None = Field(
+        default=None,
+        description="words the claim's subject or quote must contain, e.g. 'Blackwell' or "
+        "'dividend'",
+    )
+    speaker: str | None = Field(default=None, description="a name, e.g. 'Elon Musk' or 'Musk'")
+    verdict: PromiseVerdict | None = None
+    due_before: date | None = None
+    due_after: date | None = None
+    limit: int = Field(default=8, ge=1, le=15)
+
+
+class GetTrackRecordInput(BaseModel):
+    ticker: str | None = None
+    speaker: str | None = None
+    by: Literal["executive", "company"] = "executive"
+
+
+class CiteValueInput(BaseModel):
+    evidence_id: str = Field(description="the evidence id of a passage, headline or quote")
+    span: str = Field(
+        description="the exact text of that item, copied character for character, that "
+        "contains the one number to cite: 'produced 410,831 vehicles'"
+    )
 
 
 class ComputeInput(BaseModel):
@@ -398,6 +442,12 @@ async def get_statements(ctx: ToolContext, args: GetStatementsInput) -> ToolOutp
             management_only=args.management_only,
             checkable_only=args.checkable_only,
         )
+        rows = [
+            r
+            for r in rows
+            if (args.date_from is None or r.statement.statement_date >= args.date_from)
+            and (args.date_to is None or r.statement.statement_date <= args.date_to)
+        ]
         if not rows:
             others = 0
             if args.management_only:
@@ -435,8 +485,10 @@ async def get_statements(ctx: ToolContext, args: GetStatementsInput) -> ToolOutp
 async def search_filings(ctx: ToolContext, args: SearchFilingsInput) -> ToolOutput:
     """Search the text of earnings releases, CFO commentaries, 10-Qs and 10-Ks (hybrid
     keyword and vector search, reranked). Use for explanations (MD&A, section `mdna`),
-    risk factors (`risk_factors`), outlook text (`outlook`). Pass the ticker and the
-    periods when known. Returns passages with document URL and character range."""
+    risk factors (`risk_factors`), outlook text (`outlook`), and operating figures
+    (deliveries reports, shareholder letters). Pass the ticker and the periods or filing
+    dates when known. Returns passages with filing date, document URL and character
+    range."""
     results = await _search(
         ctx,
         args.query,
@@ -445,6 +497,8 @@ async def search_filings(ctx: ToolContext, args: SearchFilingsInput) -> ToolOutp
         sources=["filing"],
         doc_types=list(args.doc_types) if args.doc_types else None,
         section_types=list(args.section_types) if args.section_types else None,
+        since=args.date_from,
+        until=args.date_to,
         k=args.k,
     )
     items = [
@@ -455,6 +509,7 @@ async def search_filings(ctx: ToolContext, args: SearchFilingsInput) -> ToolOutp
             {
                 "ticker": ", ".join(r.tickers),
                 "period": r.period.label if r.period else None,
+                "filed": r.published_at.date().isoformat(),
                 "doc_type": r.doc_type,
                 "section": r.section_type,
                 "section_title": r.section_title,
@@ -476,8 +531,8 @@ async def search_news(ctx: ToolContext, args: SearchNewsInput) -> ToolOutput:
         ctx,
         args.query,
         tickers=tickers,
-        since=args.since,
-        until=args.until,
+        since=args.date_from,
+        until=args.date_to,
         sources=["news"],
         k=args.k,
     )
@@ -563,10 +618,231 @@ async def compute(ctx: ToolContext, args: ComputeInput) -> ToolOutput:
     return ToolOutput({"evidence": [item]}, [item])
 
 
+async def get_promises(ctx: ToolContext, args: GetPromisesInput) -> ToolOutput:
+    """Promises management made in public (reported in the news), framed into a fixed
+    resolution rule and judged from evidence dated after the statement: quote, speaker,
+    date, publisher and article link, the rule, due date, verdict (delivered,
+    delivered_late, partly_delivered, not_delivered, walked_back, too_early,
+    cannot_determine, or null when not resolved yet), measured value against the target,
+    and the outcome evidence as items of their own. Vague claims are listed with
+    `scored: false`: they are never judged."""
+    from talk_is_cheap.promises.queries import promise_rows
+
+    async with ctx.sessions() as session:
+        ticker = (await _company(session, args.ticker)).ticker if args.ticker else None
+        rows = await promise_rows(
+            session,
+            ticker,
+            verdicts=[args.verdict] if args.verdict else None,
+            speaker=args.speaker,
+            due_before=args.due_before,
+            due_after=args.due_after,
+        )
+    if args.query:
+        words = args.query.casefold().split()
+        rows = [
+            r
+            for r in rows
+            if all(w in f"{r.promise.subject} {r.promise.quote}".casefold() for w in words)
+        ]
+    if not rows:
+        return ToolOutput({"evidence": [], "not_found": "no promises in stored news match"}, [])
+    items: list[Evidence] = []
+    for row in rows[: args.limit]:
+        outcome = [_outcome_item(ctx, e) for e in _outcome_evidence(row)]
+        items.append(_promise_item(ctx, row, [o["id"] for o in outcome]))
+        items.extend(outcome)
+    content: dict[str, Any] = {"evidence": items}
+    if len(rows) > args.limit:
+        content["more_promises"] = len(rows) - args.limit
+    return ToolOutput(content, items)
+
+
+async def get_track_record(ctx: ToolContext, args: GetTrackRecordInput) -> ToolOutput:
+    """How executives' (or companies') public promises held up: resolved claims by
+    verdict, the on-time rate, median days late, the share walked back, the share of
+    bold claims and their hit rate. Only specific and partial claims count, each once;
+    vague claims are counted apart and never scored. A group with fewer than 5 resolved
+    claims is "too few to judge": say so, and give no rate for it."""
+    from talk_is_cheap.promises.queries import promise_rows
+    from talk_is_cheap.promises.track import TOO_FEW, company_track_records
+
+    async with ctx.sessions() as session:
+        ticker = (await _company(session, args.ticker)).ticker if args.ticker else None
+        records = await company_track_records(
+            session, by=args.by, ticker=ticker, speaker=args.speaker
+        )
+        rows = {r.promise.id: r for r in await promise_rows(session, ticker, speaker=args.speaker)}
+    if not records:
+        return ToolOutput({"evidence": [], "not_found": "no promises in stored news match"}, [])
+    items: list[Evidence] = []
+    for record in records[:10]:
+        examples = [rows[i] for i in record.promise_ids if i in rows and rows[i].verdict][:3]
+        inputs = [_promise_item(ctx, r, []) for r in examples]
+        items.extend(inputs)
+        data: dict[str, Any] = {
+            "group": record.key,
+            "claims": record.claims,
+            "resolved": record.resolved,
+            "by_verdict": record.by_verdict,
+            "vague_not_scored": record.vague,
+            "inputs": [i["id"] for i in inputs],
+        }
+        if record.enough:
+            data |= {
+                k: round(v * 100, 1) if v is not None else None
+                for k, v in (
+                    ("on_time_rate_pct", record.on_time_rate),
+                    ("walked_back_pct", record.walked_back_share),
+                    ("bold_pct", record.bold_share),
+                    ("bold_hit_rate_pct", record.bold_hit_rate),
+                )
+            }
+            data["median_days_late"] = record.median_days_late
+        else:
+            data["judgment"] = TOO_FEW
+        items.append(ctx.evidence.add("news_report", "", "get_track_record", data))
+    return ToolOutput({"evidence": items}, items)
+
+
+def _promise_item(ctx: ToolContext, row: Any, outcome_ids: Sequence[str]) -> Evidence:
+    from talk_is_cheap.statements.commands import short_quote
+
+    promise, verdict = row.promise, row.verdict
+    data: dict[str, Any] = {
+        "promise_id": promise.id,
+        "ticker": promise.ticker,
+        "speaker": promise.speaker,
+        "date": promise.statement_date.isoformat(),
+        "publisher": row.publisher,
+        "quote": short_quote(promise.quote),
+        "subject": promise.subject,
+        "rule": promise.resolution_rule,
+        "due": promise.due_date.isoformat() if promise.due_date else "open-ended",
+        "specificity": promise.specificity,
+        "bold": promise.bold,
+        "provenance_note": f"reported by {row.publisher or 'a news outlet'}",
+    }
+    if promise.specificity == "vague":
+        data["scored"] = False
+        data["verdict_note"] = "vague: no checkable target or deadline, never scored"
+        return ctx.evidence.add("news_report", row.url, "get_promises", data)
+    data["verdict"] = row.effective
+    if row.effective is None:
+        data["verdict_note"] = "not resolved yet"
+    elif row.effective == "too_early":
+        data["verdict_note"] = "too early to judge"
+    if row.review is not None:
+        data["review"] = f"reviewed as {row.review.verdict}" + (
+            f": {row.review.note}" if row.review.note else ""
+        )
+    if promise.target_value is not None:
+        data["target"] = float(promise.target_value)
+        data["unit"] = promise.unit
+    if promise.required_value is not None:
+        data["required_value"] = float(promise.required_value)
+    if verdict is not None:
+        if verdict.measured_value is not None:
+            data["measured_value"] = float(verdict.measured_value)
+            data["measured_unit"] = verdict.measured_unit
+        data["reasoning"] = verdict.reasoning
+        if verdict.days_late is not None:
+            data["days_late"] = verdict.days_late
+        if verdict.failed_checks:
+            data["failed_checks"] = verdict.failed_checks
+    if outcome_ids:
+        data["outcome_evidence"] = list(outcome_ids)
+    return ctx.evidence.add("news_report", row.url, "get_promises", data)
+
+
+def _outcome_evidence(row: Any) -> list[dict[str, Any]]:
+    """The outcome evidence a verdict cites that has a URL, at most 3."""
+    if row.verdict is None or row.promise.specificity == "vague":
+        return []
+    return [e for e in row.verdict.evidence if e.get("url")][:3]
+
+
+def _outcome_item(ctx: ToolContext, record: Mapping[str, Any]) -> Evidence:
+    data = record.get("data") or {}
+    kept = {
+        k: (_cut(v, 300) if isinstance(v, str) else v)
+        for k, v in data.items()
+        if k in ("ticker", "metric", "period", "value", "unit", "display", "doc_type",
+                 "section", "headline", "publisher", "claim", "quote", "text", "span")
+    }  # fmt: skip
+    kept["kind"] = f"outcome evidence ({record.get('tool')})"
+    kept["date"] = record.get("date")
+    provenance: Provenance = record.get("provenance") or "sec_filing"
+    return ctx.evidence.add(provenance, str(record["url"]), "promise_evidence", kept)
+
+
+async def cite_value(ctx: ToolContext, args: CiteValueInput) -> ToolOutput:
+    """A number from text, grounded like a reported value: give the evidence id of a
+    passage, headline or quote and the exact span that contains the number. The span
+    must be in that item's text and hold exactly one number; returns it as new evidence
+    with its value, unit and the source's date and URL, for `compute`."""
+    source = ctx.evidence.get(args.evidence_id.strip())
+    if source is None:
+        raise ToolFailed(f"{args.evidence_id} is not an evidence id")
+    found = cited_number(source, args.span)
+    item = ctx.evidence.add(
+        source["provenance"],
+        source["url"],
+        "cite_value",
+        {
+            "source": source["id"],
+            "span": found.span,
+            "value": float(found.value),
+            "unit": found.unit,
+            "display": display(found.value, found.unit),
+            **({"date": d.isoformat()} if (d := evidence_date(source)) else {}),
+        },
+    )
+    return ToolOutput({"evidence": [item]}, [item])
+
+
+@dataclass(frozen=True, slots=True)
+class CitedNumber:
+    span: str  # as the source writes it
+    value: Decimal
+    unit: str  # USD, percent, or the counted word ("vehicles")
+
+
+# Fields of an evidence item a cited span may come from.
+TEXT_FIELDS = ("text", "quote", "headline", "summary", "claim")
+
+
+def cited_number(source: Evidence, span: str) -> CitedNumber:
+    """The one number in `span`, which must be in one of the source's text fields.
+    Raises ToolFailed otherwise."""
+    from talk_is_cheap.agent.checks import mentions, strip_non_figures
+    from talk_is_cheap.guidance.grounding import locate
+
+    for name in TEXT_FIELDS:
+        text = source["data"].get(name)
+        if not isinstance(text, str):
+            continue
+        place = locate(span, text)
+        if place is None:
+            continue
+        written = text[place[0] : place[1]]
+        numbers = [m for m in mentions(written)]
+        if len(numbers) != 1:
+            raise ToolFailed(f"the span holds {len(numbers)} numbers; give a span with exactly one")
+        number = numbers[0]
+        unit = {"usd": "USD", "pct": "percent"}.get(number.kind)
+        if unit is None:
+            after = strip_non_figures(written).split(number.text, 1)[-1].split()
+            unit = after[0].strip(".,;:()").lower() if after else "count"
+        return CitedNumber(written, number.value, unit)
+    raise ToolFailed(f"the span is not in the text of {source['id']}")
+
+
 async def run_sql(ctx: ToolContext, args: RunSqlInput) -> ToolOutput:
     """One read-only SELECT over companies, filings, financial_values, documents,
     sections, guidance, guidance_sources, guidance_reviews, stock_splits, articles,
-    article_companies, statements and statement_outcomes; at most 200 rows, 5 seconds.
+    article_companies, statements, statement_outcomes, promises, promise_verdicts and
+    promise_reviews; at most 200 rows, 5 seconds.
     For questions the other tools cannot answer (counts, rankings). Rows have no citation
     URL: cite figures from get_actuals, get_guidance or get_statements."""
     try:
@@ -603,6 +879,9 @@ TOOLS: Mapping[str, tuple[ToolFunction, type[BaseModel]]] = {
     "search_filings": (search_filings, SearchFilingsInput),
     "search_news": (search_news, SearchNewsInput),
     "compute": (compute, ComputeInput),
+    "cite_value": (cite_value, CiteValueInput),
+    "get_promises": (get_promises, GetPromisesInput),
+    "get_track_record": (get_track_record, GetTrackRecordInput),
     "run_sql": (run_sql, RunSqlInput),
 }
 

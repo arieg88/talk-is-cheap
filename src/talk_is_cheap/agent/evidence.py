@@ -6,6 +6,7 @@ plain JSON so they live in the graph's state and its checkpoints.
 """
 
 from collections.abc import Iterable, Mapping
+from datetime import date
 from typing import Any, Literal
 
 Provenance = Literal["sec_filing", "company_press_release", "news_report"]
@@ -66,10 +67,34 @@ class EvidenceLog:
         return self.items.get(evidence_id)
 
 
+# Tools whose items are computed from other items (`inputs`) rather than read from a
+# document: a citation of one stands for the items it was computed from.
+DERIVED_TOOLS = ("compute", "get_track_record")
+
+
+def is_derived(item: Evidence) -> bool:
+    return item["tool"] in DERIVED_TOOLS
+
+
+def evidence_date(item: Evidence) -> date | None:
+    """The day an item became public: a filing's filing date, an article's publish
+    date, a statement's date (a later claim by the company). A cited number has its
+    source's date."""
+    data = item["data"]
+    for name in ("filed", "published", "date", "issued_on"):
+        value = data.get(name)
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                continue
+    return None
+
+
 def sources_of(item: Evidence, items: Mapping[str, Evidence]) -> list[Evidence]:
     """The items a citation of `item` stands for: a computed result stands for the
     items it was computed from."""
-    if item["tool"] != "compute":
+    if not is_derived(item):
         return [item]
     found: list[Evidence] = []
     for source_id in item["data"].get("inputs", []):

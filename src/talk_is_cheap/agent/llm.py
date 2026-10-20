@@ -44,11 +44,11 @@ MAX_OUTPUT_TOKENS: Mapping[str, int] = {
 INPUT_OVERHEAD_TOKENS = 600
 
 PROMPT_VERSIONS: Mapping[str, str] = {
-    "router": "v2",
-    "planner": "v2",
-    "executor": "v2",
+    "router": "v3",
+    "planner": "v3",
+    "executor": "v3",
     "verifier": "v2",
-    "answer": "v2",
+    "answer": "v3",
 }
 
 

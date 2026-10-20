@@ -12,12 +12,10 @@ post-processing version re-processes stored extractions from the cache without a
 
 import asyncio
 import hashlib
-import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
-from importlib.resources import files
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -26,7 +24,6 @@ from talk_is_cheap.db.models import Company, Statement
 from talk_is_cheap.db.models import StatementExtraction as ExtractionRow
 from talk_is_cheap.edgar.fiscal import FiscalCalendar
 from talk_is_cheap.guidance.llm import (
-    CHARS_PER_TOKEN,
     Budget,
     CacheOnlyModel,
     CostCapReached,
@@ -36,7 +33,9 @@ from talk_is_cheap.guidance.llm import (
     Response,
     ResponseCache,
     Usage,
+    bounded_usage,
     complete,
+    load_prompt_file,
 )
 from talk_is_cheap.statements.candidates import Candidate, candidates
 from talk_is_cheap.statements.items import PROCESSING_VERSION, Claim, Dropped, SourceText, process
@@ -60,11 +59,7 @@ MAX_TEXT_CHARS = 12_000
 
 
 def load_prompt(version: str = PROMPT_VERSION) -> str:
-    return (
-        files("talk_is_cheap")
-        .joinpath("prompts", PROMPT_NAME, f"{version}.md")
-        .read_text(encoding="utf-8")
-    )
+    return load_prompt_file(PROMPT_NAME, version)
 
 
 def prompt_text(text: str) -> str:
@@ -95,9 +90,7 @@ def render_prompt(template: str, candidate: Candidate, company: UniverseCompany)
 def estimate_usage(prompt: str) -> Usage:
     """The largest usage a call can have: its input, estimated generously, and the
     output limit."""
-    return Usage(
-        INPUT_OVERHEAD_TOKENS + math.ceil(len(prompt) / CHARS_PER_TOKEN), MAX_OUTPUT_TOKENS
-    )
+    return bounded_usage(prompt, INPUT_OVERHEAD_TOKENS, MAX_OUTPUT_TOKENS)
 
 
 def input_hash(prompt: str) -> str:

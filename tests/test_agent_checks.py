@@ -140,3 +140,9 @@ def test_evidence_ids_continue_and_computed_items_cite_their_inputs() -> None:
     added = log.add("sec_filing", "u", "compute", {"inputs": ["E2", "E1"], "result": 1.0})
     assert added["id"] == "E3"
     assert [s["id"] for s in sources_of(added, log.items)] == ["E2", "E1"]
+
+
+def test_a_month_and_year_leaves_no_stray_number() -> None:
+    assert [m.text for m in mentions("news from January 2024 and October 2026")] == []
+    assert [m.text for m in mentions("on June 28, 2024 it paid $0.10")] == ["$0.10"]
+    assert [m.text for m in mentions("reported on May 22\u201323, 2024 and June 3-4")] == []
