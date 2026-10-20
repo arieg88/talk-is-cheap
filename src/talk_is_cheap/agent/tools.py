@@ -116,6 +116,9 @@ class ToolContext:
     # Hybrid results the cross-encoder re-orders in `search_filings` and `search_news`;
     # None for the retrieval default.
     rerank_depth: int | None = None
+    # What `search_filings` keeps of a passage, in characters; None for all of it (the
+    # promise resolver, whose judge must see the whole passage).
+    passage_chars: int | None = PASSAGE_CHARS
     _models: dict[str, Any] = field(default_factory=dict)
 
     def loaded_embedder(self) -> "Embedder":
@@ -534,7 +537,9 @@ async def search_filings(ctx: ToolContext, args: SearchFilingsInput) -> ToolOutp
                 "section": r.section_type,
                 "section_title": r.section_title,
                 "chars": f"{r.char_start}-{r.char_end}",
-                "text": _cut(" ".join(r.text.split()), PASSAGE_CHARS),
+                "text": _cut(" ".join(r.text.split()), ctx.passage_chars)
+                if ctx.passage_chars is not None
+                else " ".join(r.text.split()),
             },
         )
         for r in results

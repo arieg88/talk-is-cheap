@@ -292,6 +292,8 @@ def derive(
     cutoff = grace_end or promise.due_date
     revised = any(cutoff is None or d <= cutoff for d in revisions)
     satisfying = dated("satisfies")
+    # Satisfying evidence resolves the claim whenever it appears, before the due date too,
+    # and a claim delivered is never walked back: revised first, it is delivered late.
     if satisfying:
         proof, source = satisfying[0]
         if promise.due_date is None:
@@ -383,6 +385,9 @@ def check(
         )
     if result.failed:
         result.verdict = "cannot_determine"
+    satisfied = any(a.finding == "satisfies" and a.evidence_id in items for a in findings)
+    if satisfied and result.verdict in ("walked_back", "too_early", "expired_unproven"):
+        raise AssertionError(f"delivered claim given {result.verdict}")  # derive forbids it
     return result
 
 

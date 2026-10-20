@@ -151,7 +151,10 @@ date, a later statement's article; a computed item takes the latest of its input
    `satisfies` (the item shows the rule met: a filing or release reporting the thing as
    having happened, revenue from the product, a completed launch, in full; never a plan,
    a schedule or a repeat of the announcement), `partly` (only part met), `contradicts`,
-   `walks_back` or `irrelevant` (including another or a later product). For a satisfying
+   `walks_back` or `irrelevant` (including another or a later product). The judge reads
+   whole passages (the resolver's `search_filings` keeps all of each passage, the agent's
+   keeps 700 characters); of a text longer than 1,600 characters, the windows of 300
+   characters around each key term of the rule, joined. For a satisfying
    item, the exact text that says when it happened. For numeric targets, *where* the
    measured number is (an evidence id and the exact span), never the number itself: a
    target with "at least" or "more than" and no measured value cannot be determined. At
@@ -172,7 +175,9 @@ date, a later statement's article; a computed item takes the latest of its input
    passed, `cannot_determine` after. Silence is not failure. A claim revised by a later
    statement no later than the report of its due period (the end of the grace period) and
    delivered after its due date is `delivered_late` with `revised_before_due`;
-   `walked_back` is only for a claim revised and never delivered.
+   `walked_back` is only for a claim revised and never delivered: code tests satisfying
+evidence first, and a claim with any is never `walked_back`, `too_early` or
+`expired_unproven` (an invariant `check` enforces).
 6. **Check** (code), before anything is stored. Cited items are those not found
    irrelevant, and the measured sources. A failed check makes the verdict
    `cannot_determine` and is recorded by name:
@@ -206,7 +211,9 @@ at the release would make every metric-based delivery late.
 
 **When.** `promises resolve` (`--due-only`, the default) takes the specific and partial
 claims with a target whose grace period has ended, except those linked to formal
-guidance. Open-ended claims are checked once a 10-Q or 10-K has been filed since the
+guidance, and those not due yet once a 10-Q or 10-K has been filed since the statement:
+satisfying evidence resolves a claim whenever it appears, before its due date too, and a
+claim is `too_early` only while nothing satisfies it. Open-ended claims are checked once a 10-Q or 10-K has been filed since the
 statement, for delivery only: until 18 months after the statement any other verdict
 leaves them open, as `too_early`, and then they are `expired_unproven`. `too_early`
 claims are checked again by later runs.
@@ -475,8 +482,8 @@ cost nothing, every response coming from the cache.
   outcome was announced somewhere not stored (a conference, another company's release,
   a paywalled outlet).
 - **Evidence search.** Searches cover the claim's company and up to two related
-  companies it names; three results per search miss passages ranked lower (AMD's July
-  2024 release on Microsoft's Azure instances is not among them).
+  companies it names; three results per search (five per related company) miss
+  passages ranked lower.
 - **Timing uses publication dates.** A delivery's date is the date the earliest
   satisfying evidence became public, not the date it says the event happened, so a late
   filing can make an on-time delivery look late.

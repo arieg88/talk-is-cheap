@@ -16,8 +16,10 @@ A small LangGraph graph per claim, over the agent's tools:
 - check: `checks.py`, before anything is stored.
 
 Which claims: specific and partial ones with a checkable target (vague claims are never
-scored; a deadline without a target has nothing to judge), by default
-only those due: the due date and its grace period have passed (`PROMISE_GRACE_DAYS`;
+scored; a deadline without a target has nothing to judge), by default those due, and
+those not due yet once a 10-Q or 10-K has been filed since the statement, since evidence
+that satisfies a claim resolves it whenever it appears (they stay `too_early` until it
+does). Due: the due date and its grace period have passed (`PROMISE_GRACE_DAYS`;
 by default until the first 10-Q or 10-K covering the due period, whose XBRL values are
 the reported results). Open-ended claims are checked for delivery once a 10-Q or 10-K
 has been filed since the statement. `too_early` verdicts are
@@ -66,7 +68,14 @@ from talk_is_cheap.guidance.llm import (
     complete,
     load_prompt_file,
 )
-from talk_is_cheap.promises.checks import Checked, Measured, PromiseFacts, check, item_date
+from talk_is_cheap.promises.checks import (
+    Checked,
+    Measured,
+    PromiseFacts,
+    check,
+    item_date,
+    key_terms,
+)
 from talk_is_cheap.promises.framing import NUMERIC_KINDS, covering_period
 from talk_is_cheap.promises.schema import EvidencePlan, Judgment
 from talk_is_cheap.universe import Universe
@@ -83,8 +92,10 @@ RELATED_K = 5
 # Results per search: enough to find a figure, few enough to keep the judge's input small.
 SEARCH_K = 3
 LATER_STATEMENTS = 6
-# What the judge reads of each item's text.
-TEXT_CHARS = 500
+# What the judge reads of each item's text: all of it up to JUDGE_TEXT_CHARS; of a longer
+# text, the windows of WINDOW_CHARS around each key term of the rule, joined.
+JUDGE_TEXT_CHARS = 1_600
+WINDOW_CHARS = 300
 # Output limits, and what a call reserves against the budget.
 PLAN_OUTPUT_TOKENS = 800
 JUDGE_OUTPUT_TOKENS = 2_500
@@ -93,7 +104,7 @@ JUDGE_OVERHEAD_TOKENS = 1_300
 # What a typical claim costs in output, for the estimate a run prints (docs/promises.md).
 TYPICAL_OUTPUT_TOKENS = 450
 # Evidence for a claim is input of this size at most, for the estimate.
-JUDGE_EVIDENCE_CHARS = MAX_TOOL_CALLS * SEARCH_K * (TEXT_CHARS + 200)
+JUDGE_EVIDENCE_CHARS = MAX_TOOL_CALLS * SEARCH_K * (JUDGE_TEXT_CHARS + 200)
 # Filings that cover a fiscal period: the 10-Q or 10-K, whose XBRL values are the
 # reported results. Earnings releases come a few days earlier, so evidence from a release
 # is always on time.
@@ -230,8 +241,14 @@ def is_due(promise: Promise, end: date | None, filings: Sequence[Filed], today: 
     """Due: the grace period has ended; an open-ended claim, once anything was filed
     after it."""
     if promise.due_date is None:
-        return any(f.filed > promise.statement_date for f in filings)
+        return filed_since(promise, filings)
     return end is not None and end <= today
+
+
+def filed_since(promise: Promise, filings: Sequence[Filed]) -> bool:
+    """Whether a 10-Q or 10-K was filed after the statement: before that, no evidence of
+    delivery can be in the filings."""
+    return any(f.filed > promise.statement_date for f in filings)
 
 
 # The graph.
@@ -311,7 +328,11 @@ def plan_prompt(promise: Promise, fiscal_note: str, today: date) -> str:
 
 
 def judge_prompt(
-    promise: Promise, items: Mapping[str, Evidence], grace: date | None, today: date
+    promise: Promise,
+    items: Mapping[str, Evidence],
+    grace: date | None,
+    today: date,
+    company_names: Sequence[str] = (),
 ) -> str:
     values = {
         "ticker": promise.ticker,
@@ -325,7 +346,11 @@ def judge_prompt(
         "due": promise.due_date.isoformat() if promise.due_date else "none (open-ended)",
         "grace": grace.isoformat() if grace else "no filing covering the due period yet",
         "today": today.isoformat(),
-        "evidence": json.dumps(_for_judge(items), default=str, separators=(",", ":")),
+        "evidence": json.dumps(
+            _for_judge(items, key_terms(promise.resolution_rule, company_names)),
+            default=str,
+            separators=(",", ":"),
+        ),
     }
     return _fill(load_prompt_file(*JUDGE_PROMPT), values)
 
@@ -349,12 +374,44 @@ def _target_line(promise: Promise) -> str:
     return "; ".join(parts)
 
 
-def _for_judge(items: Mapping[str, Evidence]) -> list[dict[str, Any]]:
-    """Items as the judge reads them: id, tool, date and data, texts cut."""
+def judge_text(text: str, terms: Sequence[str]) -> str:
+    """What the judge reads of a text: all of it when it is short; else the windows around
+    the rule's key terms (merged where they overlap, joined with " … "), up to
+    JUDGE_TEXT_CHARS; the start of the text when no term occurs."""
+    if len(text) <= JUDGE_TEXT_CHARS:
+        return text
+    folded = text.casefold()
+    spans: list[tuple[int, int]] = []
+    for term in terms:
+        for found in re.finditer(re.escape(term.casefold()), folded):
+            start = max(0, found.start() - WINDOW_CHARS)
+            spans.append((start, min(len(text), found.end() + WINDOW_CHARS)))
+    if not spans:
+        return text[:JUDGE_TEXT_CHARS] + " …"
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    pieces, used = [], 0
+    for start, end in merged:
+        if used >= JUDGE_TEXT_CHARS:
+            break
+        piece = text[start : min(end, start + JUDGE_TEXT_CHARS - used)]
+        pieces.append(piece)
+        used += len(piece)
+    joined = " … ".join(pieces)
+    return ("… " if merged[0][0] > 0 else "") + joined + (" …" if merged[-1][1] < len(text) else "")
+
+
+def _for_judge(items: Mapping[str, Evidence], terms: Sequence[str] = ()) -> list[dict[str, Any]]:
+    """Items as the judge reads them: id, tool, date and data; long texts as the windows
+    around the rule's key terms (`judge_text`)."""
     out = []
     for item in compact(items.values()):
         entry = {
-            k: (v[:TEXT_CHARS] + " …" if isinstance(v, str) and len(v) > TEXT_CHARS else v)
+            k: (judge_text(v, terms) if isinstance(v, str) else v)
             for k, v in item.items()
             if k not in ("url", "provenance", "provenance_note", "accession_no", "chars")
         }
@@ -518,7 +575,14 @@ def build_resolver(deps: ResolveDeps, fiscal_notes: Mapping[str, str]) -> Any:
     async def judge(state: ResolveState) -> dict[str, Any]:
         promise: Promise = state["promise"]["row"]
         items = state.get("evidence") or {}
-        prompt = judge_prompt(promise, items, state["promise"]["grace"], deps.today)
+        ctx: ToolContext = state["promise"]["ctx"]
+        prompt = judge_prompt(
+            promise,
+            items,
+            state["promise"]["grace"],
+            deps.today,
+            _company_names(promise.ticker, ctx.universe),
+        )
         response = await complete(
             deps.judge,
             prompt,
@@ -576,7 +640,7 @@ async def resolve_one(
     grace: date | None,
     fiscal: FiscalCalendar | None = None,
 ) -> Resolution:
-    ctx = replace(deps.tools, evidence=EvidenceLog(), calls=[])
+    ctx = replace(deps.tools, evidence=EvidenceLog(), calls=[], passage_chars=None)
     started = time.monotonic()
     async with ctx.sessions() as session:
         context = await claim_context(session, promise, deps.today)
@@ -692,7 +756,9 @@ async def plan_resolution(
             end = grace_end(head.due_date, filings, fiscal, grace_days)
             if is_due(head, end, filings, today):
                 due += 1
-            elif due_only:
+            elif due_only and not filed_since(head, filings):
+                # Not due yet: checked for early delivery once a 10-Q or 10-K has been
+                # filed since the statement; `too_early` until something satisfies it.
                 continue
             stored = verdicts.get(head.id)
             fresh = stored is not None and stored.rule_hash == rule_hash(head)

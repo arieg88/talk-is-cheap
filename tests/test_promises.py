@@ -665,3 +665,39 @@ def test_same_day_evidence_counts_when_it_is_later_or_reports_a_later_period() -
                        measured(None), None, date(2026, 8, 1))  # fmt: skip
         failed = "evidence_after_statement" in result.failed
         assert failed is not ok, item_id
+
+
+def test_satisfying_evidence_resolves_a_claim_before_its_due_date() -> None:
+    items = items_with(("2025-06-02", "We produced 836,000 vehicles."))
+    early = check(FACTS, judged(("E1", "satisfies"), measured_ids=("E1",)), items,
+                  measured(836_000), None, date(2025, 7, 1))  # fmt: skip
+    assert early.verdict == "delivered" and early.proof_date == date(2025, 6, 2)
+    nothing = check(FACTS, judged(("E1", "irrelevant")), items, measured(None), None,
+                    date(2025, 7, 1))  # fmt: skip
+    assert nothing.verdict == "too_early"
+
+
+def test_a_delivered_claim_is_never_walked_back() -> None:
+    items = items_with(
+        ("2025-05-01", "We now expect to reach 800,000 vehicles later than planned."),
+        ("2026-09-01", "We produced 836,000 vehicles."),
+    )
+    for grace in (None, date(2026, 4, 20)):
+        findings = judged(("E1", "walks_back"), ("E2", "satisfies"), measured_ids=("E2",))
+        result = check(FACTS, findings, items, measured(836_000), grace, date(2026, 10, 1))
+        assert result.verdict == "delivered_late" and result.revised_before_due
+
+
+def test_the_judge_reads_whole_passages_or_windows_around_key_terms() -> None:
+    from talk_is_cheap.promises.resolve import JUDGE_TEXT_CHARS, judge_text
+
+    short = "Microsoft announced Azure ND MI300X v5 instances."
+    assert judge_text(short, ["MI300X"]) == short
+    long = (
+        "x " * 1500
+        + "Microsoft announced general availability of Azure ND MI300X v5 instances. "
+        + "y " * 1500
+    )
+    read = judge_text(long, ["MI300X", "Azure"])
+    assert "Azure ND MI300X v5" in read and len(read) <= JUDGE_TEXT_CHARS + 10
+    assert judge_text(long, ["Nothing"]).startswith("x x")
