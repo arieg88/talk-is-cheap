@@ -8,8 +8,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import InstrumentedAttribute
 
+from talk_is_cheap.config import Settings
 from talk_is_cheap.db.models import LlmSpend
-from talk_is_cheap.guidance.llm import Usage
+from talk_is_cheap.guidance.llm import Budget, Pricing, Usage
 
 
 class DatabaseLedger:
@@ -35,6 +36,37 @@ class DatabaseLedger:
                     counted=True,
                 )
             )
+
+
+async def command_budget(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    pricing: Pricing,
+    command: str,
+    *,
+    cap: Decimal | None = None,
+) -> Budget:
+    """A budget for one command: its cost cap (LLM_COST_CAP unless `cap` is given), the
+    project's total budget less what the ledger has recorded, and the ledger to record
+    its calls."""
+    async with sessions() as session:
+        spent = await counted_spend(session)
+    return Budget(
+        settings.llm_cost_cap if cap is None else cap,
+        pricing,
+        limit=settings.llm_budget_usd,
+        spent_before=spent,
+        ledger=DatabaseLedger(sessions, command),
+    )
+
+
+def budget_line(budget: Budget) -> str:
+    assert budget.limit is not None
+    remaining = max(budget.limit - budget.total_spent, Decimal(0))
+    return (
+        f"LLM budget: ${budget.total_spent:.4f} of ${budget.limit:.2f} spent, "
+        f"${remaining:.4f} remaining (talk-is-cheap spend)"
+    )
 
 
 async def counted_spend(session: AsyncSession) -> Decimal:

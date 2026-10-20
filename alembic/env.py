@@ -19,10 +19,23 @@ target_metadata = Base.metadata
 # declared on the model, so autogenerate leaves them alone.
 VECTOR_INDEX_PREFIX = "ix_embeddings_hnsw_"
 
+# The agent's LangGraph checkpointer tables: created by migration 0009 with the
+# library's own schema, read and written only by langgraph-checkpoint-postgres, and not
+# declared as models, so autogenerate leaves them and their indexes alone.
+CHECKPOINT_TABLES = frozenset(
+    {"checkpoint_migrations", "checkpoints", "checkpoint_blobs", "checkpoint_writes"}
+)
+
 
 def include_object(
     obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
 ) -> bool:
+    if type_ == "table" and name in CHECKPOINT_TABLES:
+        return False
+    if type_ in ("index", "column", "unique_constraint", "foreign_key_constraint"):
+        table = getattr(obj, "table", None)
+        if getattr(table, "name", None) in CHECKPOINT_TABLES:
+            return False
     return not (type_ == "index" and (name or "").startswith(VECTOR_INDEX_PREFIX))
 
 

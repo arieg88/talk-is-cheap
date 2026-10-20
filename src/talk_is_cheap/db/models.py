@@ -1,5 +1,5 @@
 """ORM models for companies, filings, financial data, filing text, news, the
-retrieval index and guidance."""
+retrieval index, guidance and agent runs."""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -607,3 +607,40 @@ class LlmSpend(Base):
     cost: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     counted: Mapped[bool] = mapped_column(Boolean)
     note: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentRun(Base):
+    """One question answered by `talk-is-cheap ask`: what was asked on which thread, with
+    which prompts and model, the tool calls, tokens, cost, time, verifier failures by
+    check, and the answer. `cached_calls` of `llm_calls` were answered from the response
+    cache."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        Index("ix_agent_runs_thread_id", "thread_id"),
+        Index("ix_agent_runs_started_at", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    thread_id: Mapped[str] = mapped_column(String(64))
+    question: Mapped[str] = mapped_column(Text)
+    # Each node's prompt version: "router/v1 planner/v1 executor/v1 verifier/v1 answer/v1".
+    prompt_version: Mapped[str] = mapped_column(String(128))
+    model: Mapped[str] = mapped_column(String(128))
+    question_type: Mapped[str | None] = mapped_column(String(16))
+    # [{"name", "arguments", "seconds", "evidence", "error"}], in call order.
+    tool_calls: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    llm_calls: Mapped[int] = mapped_column(Integer)
+    cached_calls: Mapped[int] = mapped_column(Integer)
+    input_tokens: Mapped[int] = mapped_column(Integer)
+    output_tokens: Mapped[int] = mapped_column(Integer)
+    cost: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    seconds: Mapped[Decimal] = mapped_column(Numeric(10, 3))
+    revisions: Mapped[int] = mapped_column(SmallInteger)
+    # Verifier failures by the check that caught them: {"numbers_grounded": 1, ...}.
+    verifier_failures: Mapped[dict[str, int]] = mapped_column(JSONB)
+    # Calls, cached calls, tokens and cost per node.
+    usage: Mapped[dict[str, object]] = mapped_column(JSONB)
+    verified: Mapped[bool] = mapped_column(Boolean)
+    answer: Mapped[str] = mapped_column(Text)

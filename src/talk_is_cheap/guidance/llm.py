@@ -157,9 +157,12 @@ def model_label(settings: "Settings", model: str | None = None) -> str:
     return name
 
 
-def build_model(settings: "Settings", model: str | None = None) -> LangChainModel:
-    """The configured chat model. Raises LlmError when the provider is unknown, its
-    LangChain package is missing, or no API key is set."""
+def build_chat_model(
+    settings: "Settings", model: str | None = None, *, max_tokens: int = MAX_OUTPUT_TOKENS
+) -> Any:
+    """The configured LangChain chat model, with at most `max_tokens` of output. Raises
+    LlmError when the provider is unknown, its LangChain package is missing, or no API
+    key is set."""
     provider = settings.llm_provider
     name = model or settings.llm_model
     if provider not in PROVIDERS:
@@ -174,13 +177,18 @@ def build_model(settings: "Settings", model: str | None = None) -> LangChainMode
     options: dict[str, Any] = {
         "model": name,
         "api_key": settings.llm_api_key.get_secret_value(),
-        "max_tokens": MAX_OUTPUT_TOKENS,
+        "max_tokens": max_tokens,
         "max_retries": 4,
         "timeout": 300,
     }
     if provider == "anthropic" and settings.llm_effort:
         options["effort"] = settings.llm_effort
-    return LangChainModel(chat_class(**options), model_label(settings, name))
+    return chat_class(**options)
+
+
+def build_model(settings: "Settings", model: str | None = None) -> LangChainModel:
+    """The configured chat model with structured output for guidance extraction."""
+    return LangChainModel(build_chat_model(settings, model), model_label(settings, model))
 
 
 def pricing_for(model_name: str, settings: "Settings") -> Pricing | None:
@@ -213,11 +221,25 @@ class ResponseCache:
         safe_model = model.replace("/", "_").replace(":", "_")
         return self._directory / safe_model / prompt_version / f"{self.request_hash(prompt)}.json"
 
-    def get(self, model: str, prompt_version: str, prompt: str) -> Response | None:
+    def read(self, model: str, prompt_version: str, prompt: str) -> dict[str, Any] | None:
+        """The stored JSON of a response, or None."""
         path = self.path(model, prompt_version, prompt)
         if not path.exists():
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return data
+
+    def write(self, model: str, prompt_version: str, prompt: str, data: Mapping[str, Any]) -> None:
+        path = self.path(model, prompt_version, prompt)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        temporary.replace(path)
+
+    def get(self, model: str, prompt_version: str, prompt: str) -> Response | None:
+        data = self.read(model, prompt_version, prompt)
+        if data is None:
+            return None
         return Response(
             Extraction.model_validate(data["extraction"]),
             Usage(data["input_tokens"], data["output_tokens"]),
@@ -226,8 +248,6 @@ class ResponseCache:
         )
 
     def put(self, model: str, prompt_version: str, prompt: str, response: Response) -> None:
-        path = self.path(model, prompt_version, prompt)
-        path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "model": model,
             "prompt_version": prompt_version,
@@ -236,9 +256,7 @@ class ResponseCache:
             "cost": str(response.cost),
             "extraction": response.extraction.model_dump(mode="json"),
         }
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(data, indent=1), encoding="utf-8")
-        temporary.replace(path)
+        self.write(model, prompt_version, prompt, data)
 
 
 class BudgetExhausted(CostCapReached):
@@ -286,7 +304,12 @@ class Budget:
     def reserve(self, prompt: str) -> Decimal:
         """Hold the estimated cost of a call, or raise CostCapReached (this run) or
         BudgetExhausted (the total budget) if it could exceed either."""
-        worst = self.pricing.cost(estimate_usage(prompt))
+        return self.reserve_usage(estimate_usage(prompt))
+
+    def reserve_usage(self, estimate: Usage) -> Decimal:
+        """`reserve` for a call whose largest usage is known: its input and its output
+        limit."""
+        worst = self.pricing.cost(estimate)
         if self.limit is not None and self.total_spent + self.reserved + worst > self.limit:
             remaining = max(self.limit - self.total_spent, Decimal(0))
             raise BudgetExhausted(
@@ -330,20 +353,21 @@ async def complete(
     try:
         extraction, usage = await model.extract(prompt)
     except LlmError as exc:
-        await _paid(budget, model.name, prompt_version, reservation, exc.usage)
+        await record_paid(budget, model.name, prompt_version, reservation, exc.usage)
         raise
     except BaseException:
         budget.settle(reservation, None)
         raise
-    cost = await _paid(budget, model.name, prompt_version, reservation, usage)
+    cost = await record_paid(budget, model.name, prompt_version, reservation, usage)
     response = Response(extraction, usage, cost, cached=False)
     cache.put(model.name, prompt_version, prompt, response)
     return response
 
 
-async def _paid(
+async def record_paid(
     budget: Budget, model: str, prompt_version: str, reservation: Decimal, usage: Usage | None
 ) -> Decimal:
+    """Settle a call's reservation and record what it cost in the ledger."""
     cost = budget.settle(reservation, usage)
     if usage is not None and budget.ledger is not None:
         await budget.ledger.record(model, prompt_version, usage, cost)

@@ -3,6 +3,7 @@
 from talk_is_cheap.db.base import Base
 from talk_is_cheap.db.health import DatabaseStatus, check_database
 from talk_is_cheap.db.models import (
+    AgentRun,
     Article,
     ArticleCompany,
     ArticleFeed,
@@ -26,6 +27,7 @@ from talk_is_cheap.db.models import (
 from talk_is_cheap.db.session import create_engine, create_session_factory
 
 __all__ = [
+    "AgentRun",
     "Article",
     "ArticleCompany",
     "ArticleFeed",

@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -90,21 +90,27 @@ async def find_company(session: AsyncSession, ticker: str) -> Company | None:
     ).scalar_one_or_none()
 
 
-async def quarterly_financials(
-    session: AsyncSession,
-    cik: int,
-    *,
-    vintage: Vintage = "first",
-    quarters: int | None = 8,
-    metrics: Sequence[str] | None = None,
-) -> list[QuarterFinancials]:
-    """One row per fiscal quarter, newest first, each metric taken from one version:
-    the earliest filing that reported it ("first") or the most recent one ("latest").
-    A directly reported value is preferred over a derived one from the same filing."""
+@dataclass(slots=True)
+class YearFinancials:
+    fiscal_year: int
+    period_end: date
+    metrics: dict[str, MetricValue] = field(default_factory=dict)
+
+    @property
+    def label(self) -> str:
+        return f"FY{self.fiscal_year}"
+
+
+def _versions(
+    cik: int, period_type: str, vintage: Vintage, metrics: Sequence[str] | None
+) -> Select[FinancialValue]:
+    """One version of each metric per period: the earliest filing that reported it
+    ("first") or the most recent one ("latest"). A directly reported value is preferred
+    over a derived one from the same filing."""
     filed_order = FinancialValue.filed.asc() if vintage == "first" else FinancialValue.filed.desc()
     statement = (
         select(FinancialValue)
-        .where(FinancialValue.cik == cik, FinancialValue.period_type == "quarter")
+        .where(FinancialValue.cik == cik, FinancialValue.period_type == period_type)
         .ext(
             distinct_on(
                 FinancialValue.metric, FinancialValue.fiscal_year, FinancialValue.fiscal_quarter
@@ -121,9 +127,22 @@ async def quarterly_financials(
     )
     if metrics:
         statement = statement.where(FinancialValue.metric.in_(metrics))
+    return statement
 
+
+async def quarterly_financials(
+    session: AsyncSession,
+    cik: int,
+    *,
+    vintage: Vintage = "first",
+    quarters: int | None = 8,
+    metrics: Sequence[str] | None = None,
+) -> list[QuarterFinancials]:
+    """One row per fiscal quarter, newest first, each metric taken from one version:
+    the earliest filing that reported it ("first") or the most recent one ("latest").
+    A directly reported value is preferred over a derived one from the same filing."""
     rows: dict[tuple[int, int], QuarterFinancials] = {}
-    for fv in (await session.execute(statement)).scalars():
+    for fv in (await session.execute(_versions(cik, "quarter", vintage, metrics))).scalars():
         assert fv.fiscal_quarter is not None
         key = (fv.fiscal_year, fv.fiscal_quarter)
         row = rows.setdefault(
@@ -134,6 +153,24 @@ async def quarterly_financials(
 
     ordered = [rows[key] for key in sorted(rows, reverse=True)]
     return ordered if quarters is None else ordered[:quarters]
+
+
+async def annual_financials(
+    session: AsyncSession,
+    cik: int,
+    *,
+    vintage: Vintage = "first",
+    years: int | None = None,
+    metrics: Sequence[str] | None = None,
+) -> list[YearFinancials]:
+    """`quarterly_financials` for fiscal years, newest first."""
+    rows: dict[int, YearFinancials] = {}
+    for fv in (await session.execute(_versions(cik, "year", vintage, metrics))).scalars():
+        row = rows.setdefault(fv.fiscal_year, YearFinancials(fv.fiscal_year, fv.period_end))
+        row.period_end = max(row.period_end, fv.period_end)
+        row.metrics[fv.metric] = _to_metric_value(fv)
+    ordered = [rows[key] for key in sorted(rows, reverse=True)]
+    return ordered if years is None else ordered[:years]
 
 
 async def restatements(

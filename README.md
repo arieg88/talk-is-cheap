@@ -60,6 +60,16 @@ What each source returned when checked, and every normalization, clustering and 
 - Spending is controlled: every response is cached, `--dry-run` estimates a run, every paid call is recorded in a ledger (`talk-is-cheap spend`), and calls that could exceed the run's cost cap or the project's total budget (`LLM_BUDGET_USD`) are refused.
 - On the current 15 companies: 1,136 rows from 135 documents; 218 beat, 103 met, 36 missed, 77 pending and 702 not comparable.
 
+**Question answering**
+
+- `talk-is-cheap ask "question"` answers multi-part questions about the 15 companies by calling tools over the stored data: reported values as first or latest reported, guidance with its verdicts and review flags, filing text and news search, arithmetic over evidence, and read-only SQL. Every claim cites an SEC filing URL or a news article link, in a numbered source list.
+- A LangGraph graph: a router (rules first, the model only when they cannot decide), a planner for trends and comparisons, a tool-calling executor (at most 8 tool calls a question), a verifier and an answer step. The model never does arithmetic: growth, margins and differences come from a `compute` tool.
+- The verifier checks every draft in code first: every number, after normalizing units, %, $ and B/M, must be in the evidence; every citation must exist; every sentence with a number must cite one. Then a model checks that each claim is supported by what it cites and that filings are preferred over news. A failed draft is revised at most twice; then the answer keeps the verified sentences and says what could not be verified. Each failure records the check that caught it.
+- Investment advice, predictions and companies outside the universe get a polite answer that says what the agent can do, with no tool call.
+- Follow-ups work on a thread (`--thread`, or the interactive chat): conversations are stored by LangGraph's Postgres checkpointer.
+- Spending goes through the same cache, ledger and budget as guidance extraction, with an estimate printed before any paid run; an identical question asked again is answered from the cache at no cost. Every run is logged to `agent_runs`.
+- Smoke set of 20 questions (`evals/agent/smoke.jsonl`), scored by code against the database on facts, citations, grounding and refusals. Results, design and limits in [docs/agent.md](docs/agent.md).
+
 **Foundation**
 
 - Python 3.12 package (`talk_is_cheap`) managed with [uv](https://docs.astral.sh/uv/).
@@ -75,7 +85,7 @@ What each source returned when checked, and every normalization, clustering and 
 - Docker with Docker Compose
 - Network access to `www.sec.gov` and `data.sec.gov` for loading filings, and to the news feeds in `feeds.yaml` and `api.gdeltproject.org` for news
 - Network access to `huggingface.co` once, for the search models (about 150 MB, kept in `MODEL_CACHE_DIR`); search and indexing then run offline
-- For guidance extraction only: an API key of the configured LLM provider (Anthropic by default) and network access to its API
+- For guidance extraction and `ask` only: an API key of the configured LLM provider (Anthropic by default) and network access to its API
 
 ## Quick start
 
@@ -117,9 +127,12 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap spend` | LLM spending recorded in the ledger: total against `LLM_BUDGET_USD` and what remains, by command and by model, and notes of spending from before the ledger |
 | `talk-is-cheap guidance NVDA [--metric revenue] [--flagged] [--limit 20]` | A company's guidance (`all` for every company), newest issue first: row ID, quarter issued, target period, guided figure, actual as first reported, verdict, difference; then a REVIEW flag with the rule and numbers when the guided value is implausible against the prior period, the reason a row is pending or not comparable, whether the basis was assumed GAAP, the conditions, and the source URL with its character range. Ends with counts by verdict, leaving out rows that need review or were reviewed as wrong. `--flagged`: only flagged rows. |
 | `talk-is-cheap guidance review ID --ok\|--wrong` | Record a review decision on a row: `--ok` clears its plausibility flag, `--wrong` leaves it out of verdicts. Kept by filing and statement, so it survives re-extraction and re-processing. |
+| `talk-is-cheap ask "question" [--thread ID] [--model M] [--show-trace] [--max-cost 0.05]` | Answer a question with citations, then one line: tool calls, tokens, cost, seconds, revisions (and the checks that failed), and whether the answer came from the cache. Prints the estimate and the budget left first. `--thread` continues a conversation ("And the quarter before?"); the thread id is printed. `--show-trace` prints each node and tool call with its arguments and a truncated result. Without a question: an interactive chat on one thread, until an empty line. Every run is logged to `agent_runs`. |
+| `talk-is-cheap agent-graph [--output docs/agent-graph.md]` | Write the agent's graph as Mermaid |
+| `talk-is-cheap eval agent [--dry-run] [--only ID,ID] [--model M] [--max-cost 0.30]` | The agent's smoke set: prints the estimate, runs each question on its own thread, scores facts, citations, grounding and refusals, prints a table and the total cost, and writes `evals/agent/results/<timestamp>.json`. `--dry-run` uses a scripted model and spends nothing. |
 | `talk-is-cheap eval guidance [--models claude-haiku-5-5,claude-opus-5-5] [--details]` | Precision, recall and F1 (all, numeric and qualitative items), exact figures, period accuracy, conditions captured, and tokens and cost per document, on `evals/guidance/labels.jsonl`. Responses are cached, so re-running costs nothing. |
 
-Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar`, `ingest filings`, `index` and, when an LLM key is configured, `extract guidance`. `make index` indexes new filing text and news; `make extract` extracts new guidance and refreshes verdicts; `make eval-retrieval` and `make eval-guidance` run the benchmarks.
+Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar`, `ingest filings`, `index` and, when an LLM key is configured, `extract guidance`. `make index` indexes new filing text and news; `make extract` extracts new guidance and refreshes verdicts; `make eval-retrieval` and `make eval-guidance` run the benchmarks; `make smoke-agent` runs the agent's smoke set (`make smoke-agent ARGS=--dry-run` at no cost) and `make agent-graph` redraws `docs/agent-graph.md`.
 
 ## Adding companies or history
 
@@ -226,12 +239,12 @@ All settings are environment variables. See `.env.example`.
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model for search embeddings. Changing it re-embeds everything on the next `index`. |
 | `RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | fastembed cross-encoder for `--mode rerank` |
 | `MODEL_CACHE_DIR` | `.cache/fastembed` | Where the models are downloaded |
-| `LLM_PROVIDER` | `anthropic` | LangChain chat-model integration for guidance extraction: `anthropic`, `openai` or `google_genai` (the last two need their `langchain-*` package) |
-| `LLM_MODEL` | `claude-haiku-5-5` | Model for guidance extraction, the default for cost; `--model claude-opus-5-5` is more accurate ([docs/guidance.md](docs/guidance.md)) |
+| `LLM_PROVIDER` | `anthropic` | LangChain chat-model integration for guidance extraction and the agent: `anthropic`, `openai` or `google_genai` (the last two need their `langchain-*` package) |
+| `LLM_MODEL` | `claude-haiku-5-5` | Model for guidance extraction and every node of the agent, the default for cost; `--model claude-opus-5-5` is more accurate ([docs/guidance.md](docs/guidance.md)) |
 | `LLM_EFFORT` | `low` | Anthropic reasoning effort; empty for the model's default. Part of the model name in the cache and stored rows (`claude-opus-5-5@low`). |
 | `LLM_API_KEY` | unset | API key of the provider; `ANTHROPIC_API_KEY` is used when it is empty. Keep it in `.env`, never in the repository. |
 | `LLM_BUDGET_USD` | `2.50` | Hard cap on all LLM spending recorded in the ledger: a call that could take the total over it is refused, with what was spent and what remains |
-| `LLM_COST_CAP` | `10.00` | US dollars: a run stops before a call that could take its own spending over this |
+| `LLM_COST_CAP` | `10.00` | US dollars: a run stops before a call that could take its own spending over this (`ask` and `eval agent` take `--max-cost` instead) |
 | `LLM_INPUT_PRICE`, `LLM_OUTPUT_PRICE` | unset | US dollars per million tokens, for models without a list price in `guidance/llm.py` |
 | `LLM_CACHE_DIR` | `.cache/llm` | Every model response, by model, prompt version and request hash |
 | `DATABASE_URL` | local Docker database | Must use the `postgresql+psycopg://` driver prefix |
@@ -264,6 +277,8 @@ All settings are environment variables. See `.env.example`.
 | `llm_spend` | One row per paid LLM call: time, command, model, prompt version, tokens and cost, counted toward `LLM_BUDGET_USD`; and notes of earlier spending, not counted |
 | `guidance_reviews` | Review decisions (`ok`, `wrong`) by filing accession number and the statement's item key, with what was reviewed |
 | `stock_splits` | Splits from `guidance/splits.yaml`: effective date and ratio, used so per-share guidance is not compared across a split |
+| `agent_runs` | One row per question `ask` or `eval agent` answered: question, thread, prompt version of each node, model, question type, tool calls (name, arguments, seconds, evidence ids, error), model calls and how many came from the cache, tokens, cost, seconds, revisions, verifier failures by check, whether the answer was verified, the answer |
+| `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations` | The agent's conversations by thread, LangGraph's Postgres checkpointer schema (created by migration 0009) |
 
 ## Project layout
 
@@ -293,6 +308,19 @@ talk-is-cheap/
 │   │   ├── search.py        # filters, keyword, vector, hybrid (RRF) and rerank search
 │   │   └── evaluate.py      # retrieval benchmark: recall@k and MRR
 │   ├── spend.py             # LLM spending ledger and budget
+│   ├── agent/
+│   │   ├── tools.py         # the agent's tools over financials, guidance, search, SQL
+│   │   ├── evidence.py      # citation ids, provenance, evidence items
+│   │   ├── sql.py           # run_sql: sqlglot validation, read-only execution
+│   │   ├── router.py        # routing rules, the out-of-scope answer
+│   │   ├── checks.py        # the verifier's code checks: numbers, citations
+│   │   ├── llm.py           # chat calls through the cache, budget and ledger
+│   │   ├── graph.py         # LangGraph: router, planner, executor, verifier, answer
+│   │   ├── memory.py        # Postgres checkpointer
+│   │   ├── run.py           # one question on a thread; agent_runs log
+│   │   ├── commands.py      # ask, agent-graph
+│   │   └── smoke.py         # smoke set: scoring, dry-run script
+│   ├── prompts/agent/       # versioned node prompts (router/v1.md, ... answer/v1.md)
 │   ├── guidance/
 │   │   ├── schema.py        # what the model returns: items as written
 │   │   ├── llm.py           # LangChain model, response cache, prices, cost cap
@@ -328,6 +356,7 @@ talk-is-cheap/
 ├── alembic/                 # migrations
 ├── evals/retrieval/         # labeled questions for the retrieval benchmark
 ├── evals/guidance/          # hand-labeled outlook sections for the guidance benchmark
+├── evals/agent/             # agent smoke questions; results/ holds scored runs
 ├── tests/                   # unit tests; integration/ uses a real database
 │   └── fixtures/            # trimmed real SEC filings; news/ holds trimmed real feeds
 ├── docker-compose.yml
@@ -344,4 +373,4 @@ make test-unit   # only tests that need no database
 
 Integration tests never touch the database in `DATABASE_URL`. Each test run drops, recreates and migrates its own database, `talkischeap_test` on the local Docker server, so tests start from an empty database, as in CI. Set `TEST_DATABASE_URL` in the shell to use another one; its name must end in `_test`. Tests read neither `.env` nor the application's variables from the shell: they run with the defaults, and tests that need a setting set it themselves.
 
-Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; polling, backfill and the news commands run end to end against the database with mocked feeds; chunking, indexing and search run without downloading a model, using a word-count tokenizer, a bag-of-words embedder and a word-overlap reranker (`tests/retrieval_fakes.py`); and guidance extraction never calls a real model: a fake model answers from fixed items (`tests/guidance_fakes.py`), and extraction, rows per filing, verdicts, caching and the commands run end to end against the database. Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.
+Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; polling, backfill and the news commands run end to end against the database with mocked feeds; chunking, indexing and search run without downloading a model, using a word-count tokenizer, a bag-of-words embedder and a word-overlap reranker (`tests/retrieval_fakes.py`); and guidance extraction never calls a real model: a fake model answers from fixed items (`tests/guidance_fakes.py`), and extraction, rows per filing, verdicts, caching and the commands run end to end against the database. The agent's tools are tested directly against the test database, `run_sql`'s rules against attempts to get around them, and the whole graph (routing, revisions, the verifier's checks, thread memory in the checkpointer tables, the cache, the tool-call cap, the budget and `ask`) with a scripted model (`agent/llm.py: ScriptedChat`); no test needs `ANTHROPIC_API_KEY`. Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.

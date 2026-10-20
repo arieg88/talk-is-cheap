@@ -989,30 +989,15 @@ async def _eval_retrieval(
 async def _llm_budget(
     sessions: "async_sessionmaker[AsyncSession]", pricing: "Pricing", command: str
 ) -> "Budget":
-    """A budget for one command: its cost cap, the project's total budget less what the
-    ledger has recorded, and the ledger to record its calls."""
-    from talk_is_cheap.guidance.llm import Budget
-    from talk_is_cheap.spend import DatabaseLedger, counted_spend
+    from talk_is_cheap.spend import command_budget
 
-    settings = get_settings()
-    async with sessions() as session:
-        spent = await counted_spend(session)
-    return Budget(
-        settings.llm_cost_cap,
-        pricing,
-        limit=settings.llm_budget_usd,
-        spent_before=spent,
-        ledger=DatabaseLedger(sessions, command),
-    )
+    return await command_budget(sessions, get_settings(), pricing, command)
 
 
 def _budget_line(budget: "Budget") -> str:
-    assert budget.limit is not None
-    remaining = max(budget.limit - budget.total_spent, Decimal(0))
-    return (
-        f"LLM budget: ${budget.total_spent:.4f} of ${budget.limit:.2f} spent, "
-        f"${remaining:.4f} remaining (talk-is-cheap spend)"
-    )
+    from talk_is_cheap.spend import budget_line
+
+    return budget_line(budget)
 
 
 async def _extract_guidance(
@@ -1657,6 +1642,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--details", action="store_true", help="also list missed, extra and wrong items"
     )
 
+    agent_eval = benchmarks.add_parser(
+        "agent", help="the agent's smoke set: facts, citations, grounding and refusals"
+    )
+    agent_eval.add_argument(
+        "--questions",
+        type=Path,
+        default=Path("evals/agent/smoke.jsonl"),
+        help="smoke questions (default evals/agent/smoke.jsonl)",
+    )
+    agent_eval.add_argument(
+        "--only", type=_tickers, help="comma-separated question ids (default: all)"
+    )
+    agent_eval.add_argument(
+        "--model", help="model of the configured provider (default LLM_MODEL, Haiku 5.5)"
+    )
+    agent_eval.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run everything with a scripted fake model; spends nothing",
+    )
+    agent_eval.add_argument(
+        "--max-cost", type=Decimal, help="US dollars this run may spend (default LLM_COST_CAP)"
+    )
+    agent_eval.add_argument(
+        "--results",
+        type=Path,
+        default=Path("evals/agent/results"),
+        help="where the results JSON is written (default evals/agent/results)",
+    )
+
     extract = commands.add_parser("extract", help="extract structured data with an LLM")
     extracted = extract.add_subparsers(dest="target", required=True)
     guidance_extract = extracted.add_parser(
@@ -1680,6 +1695,29 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "spend", help="LLM spending recorded in the ledger, by command and model, and budget"
     )
+
+    asking = commands.add_parser(
+        "ask",
+        help="answer a question about the companies from filings, guidance and news, with "
+        "citations; without a question, an interactive chat on one thread",
+    )
+    asking.add_argument("question", nargs="?", help="the question (omit for a chat)")
+    asking.add_argument("--thread", help="conversation id, to ask follow-ups (default: new)")
+    asking.add_argument(
+        "--model", help="model of the configured provider (default LLM_MODEL, Haiku 5.5)"
+    )
+    asking.add_argument(
+        "--show-trace", action="store_true", help="print each node and tool call as it runs"
+    )
+    asking.add_argument(
+        "--max-cost", type=Decimal, help="US dollars this run may spend (default LLM_COST_CAP)"
+    )
+
+    graph = commands.add_parser("agent-graph", help="write the agent's graph as Mermaid")
+    graph.add_argument(
+        "--output", type=Path, default=Path("docs/agent-graph.md"),
+        help="(default docs/agent-graph.md)",
+    )  # fmt: skip
 
     guided = commands.add_parser(
         "guidance",
@@ -1797,6 +1835,25 @@ def _run(args: argparse.Namespace) -> int:
             return asyncio.run(_index(args.tickers, args.rebuild))
         case "search":
             return asyncio.run(_search(args))
+        case "ask":
+            from talk_is_cheap.agent.commands import ask_command
+
+            return asyncio.run(
+                ask_command(args.question, args.thread, args.model, args.show_trace, args.max_cost)
+            )
+        case "agent-graph":
+            from talk_is_cheap.agent.commands import agent_graph_command
+
+            return agent_graph_command(args.output)
+        case "eval" if args.benchmark == "agent":
+            from talk_is_cheap.agent.smoke import smoke_command
+
+            return asyncio.run(
+                smoke_command(
+                    args.questions, args.only, args.model, args.dry_run, args.max_cost,
+                    args.results,
+                )
+            )  # fmt: skip
         case "eval" if args.benchmark == "guidance":
             return asyncio.run(_eval_guidance(args.labels, args.models, args.details))
         case "eval":

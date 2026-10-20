@@ -84,6 +84,20 @@ def test_cli_startup_does_not_import_edgartools() -> None:
     assert result.stdout.strip() == "[]"
 
 
+def test_cli_startup_does_not_import_the_agent() -> None:
+    """LangGraph, its Postgres checkpointer, sqlglot and the Anthropic integration are
+    imported only by `ask`, `agent-graph` and `eval agent`."""
+    import subprocess
+    import sys
+
+    heavy = ("langgraph", "langchain_anthropic", "sqlglot", "psycopg_pool", "talk_is_cheap.agent")
+    code = f"import sys, talk_is_cheap.cli; print([m for m in {heavy!r} if m in sys.modules])"
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "[]"
+
+
 # Commands that print more than `head -1` reads. "late" writes its last line after `head`
 # has exited, so the closed pipe only shows when Python flushes stdout at exit.
 _PRINTERS = {
