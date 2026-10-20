@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     feeds_file: Path = Path("feeds.yaml")
     # Sent with every news request. Feed publishers see it; keep it descriptive.
     news_user_agent: str = "talk-is-cheap/0.1 (news headline collector; metadata only)"
+    # Sent when fetching article pages for statement extraction (`ingest article-text`).
+    # Its first word is the robots.txt user agent the fetcher obeys.
+    article_user_agent: str = (
+        "talk-is-cheap/0.1 (research: reads executive quotes in company news, "
+        "follows robots.txt, at most one request per second per site)"
+    )
 
     # Local models for search (fastembed). Changing the embedding model re-embeds
     # everything on the next `talk-is-cheap index`.

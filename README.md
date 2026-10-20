@@ -32,7 +32,7 @@ On the current 15 companies: a press release for 165 of 165 earnings 8-Ks (plus 
 **News**
 
 - Polls RSS and Atom feeds with one command: Yahoo Finance and Google News per company, MarketWatch and CNBC market-wide, and the newsrooms of Nvidia, Apple, Microsoft, AMD, Meta, Salesforce and Cisco (`feeds.yaml`). Each kind of source is an adapter; adding a feed is an entry in `feeds.yaml`.
-- Stores metadata only: headline, the feed's summary (at most 500 characters), canonical link, publisher and publish time in UTC. Full articles are never downloaded.
+- Stores metadata: headline, the feed's summary (at most 500 characters), canonical link, publisher and publish time in UTC. Article bodies are fetched separately, one per linked story, only for statement extraction (below).
 - Stores each article once per canonical URL (tracking parameters removed) and records every feed that supplied it. Near-duplicate headlines, the same story from several outlets, form one cluster.
 - Links articles to companies by name, alias and ticker in the headline and summary, by publisher, and by the company's own feeds, with a method and confidence per link. Per-company feeds alone are weak evidence, since Yahoo's carry stories about other companies and Google News searches ignore case.
 - Tracks each feed's health: last success, last new item, consecutive failures, and a status (ok, stale after 72 hours without new items, failing).
@@ -41,6 +41,16 @@ On the current 15 companies: a press release for 165 of 165 earnings 8-Ks (plus 
 - Polls are safe to repeat and to overlap: unchanged feeds are skipped through conditional requests or an unchanged item fingerprint, one failing feed does not stop the others, and a poll that starts while another runs exits.
 
 What each source returned when checked, and every normalization, clustering and linking rule, are in [docs/news.md](docs/news.md).
+
+**Statements in the news**
+
+- Finds forward-looking claims executives made in public, as reported in the news (interviews, conferences, press statements, posts, earnings-call remarks quoted by reporters), and checks them against what the company later reported and against its formal guidance.
+- Fetches the text of one article per story linked to a company (`ingest article-text`), obeying robots.txt for every host, one request per second per host, a 15-second timeout, and no retries of 403s, paywalls or robots refusals, which are recorded as unavailable with the reason. Text is used for extraction and grounding only; answers quote at most 40 words and link to the article.
+- A deterministic filter sends the model only stories where one passage names a roster executive or the company speaking, attributes ("said", a quote) and looks forward ("expects", "will", "by 2027"): 232 of 2,695 linked stories.
+- Extracts every claim with the guidance code's structured output, cache, budget and ledger: quote, speaker and role, attribution (named executive, spokesperson, company statement, analyst, unnamed source, reporter), direct quote or paraphrase, venue, statement date, claim type (numeric forecast, directional, plan, qualitative), metric, target period and figures. In code: quotes grounded in the text (others dropped and counted), figures and periods read as for guidance, and speakers matched to an executive roster in `universe.yaml` with role dates, so a named executive counts as management only if they held the role on that date.
+- Scores management claims only, with the guidance rules: numeric forecasts beat, met, missed, pending or not comparable; directional claims confirmed or contradicted against the prior period; plans not checkable, with the next filings' most relevant passage as context. Each is compared with formal guidance for the same metric and period issued within 45 days: consistent, differs, or no formal guidance. Claims can be reviewed like guidance.
+- Measured on 40 hand-labeled stories (`evals/statements/labels.jsonl`): attribution precision 1.000 (47 of 47; no analyst, unnamed, reporter or other company's claim attributed to management), claim recall 0.904, at $0.0012 a story with Haiku 5.5.
+- On the current 15 companies: 656 claims, 357 by management. Text could be fetched for 538 of 2,371 linked stories (most of the rest are Google News links, which its robots.txt forbids following), and most claims are about periods not reported yet, so only 5 distinct forecasts have a verdict. Details, rules and limits in [docs/statements.md](docs/statements.md).
 
 **Search**
 
@@ -62,13 +72,13 @@ What each source returned when checked, and every normalization, clustering and 
 
 **Question answering**
 
-- `talk-is-cheap ask "question"` answers multi-part questions about the 15 companies by calling tools over the stored data: reported values as first or latest reported, guidance with its verdicts and review flags, filing text and news search, arithmetic over evidence, and read-only SQL. Every claim cites an SEC filing URL or a news article link, in a numbered source list.
+- `talk-is-cheap ask "question"` answers multi-part questions about the 15 companies by calling tools over the stored data: reported values as first or latest reported, guidance with its verdicts and review flags, what executives said in the news with its outcome and comparison with guidance ("reported by <publisher>"), filing text and news search, arithmetic over evidence, and read-only SQL. Every claim cites an SEC filing URL or a news article link, in a numbered source list.
 - A LangGraph graph: a router (rules first, the model only when they cannot decide), a planner for trends and comparisons, a tool-calling executor (at most 8 tool calls a question), a verifier and an answer step. The model never does arithmetic: growth, margins and differences come from a `compute` tool.
 - The verifier checks every draft in code first: every number, after normalizing units, %, $ and B/M, must be in the evidence; every citation must exist; every sentence with a number must cite one. Then a model checks that each claim is supported by what it cites and that filings are preferred over news. A failed draft is revised at most twice; then the answer keeps the verified sentences and says what could not be verified. Each failure records the check that caught it.
 - Investment advice, predictions and companies outside the universe get a polite answer that says what the agent can do, with no tool call.
 - Follow-ups work on a thread (`--thread`, or the interactive chat): conversations are stored by LangGraph's Postgres checkpointer.
 - Spending goes through the same cache, ledger and budget as guidance extraction, with an estimate printed before any paid run; an identical question asked again is answered from the cache at no cost. Every run is logged to `agent_runs`.
-- Smoke set of 20 questions (`evals/agent/smoke.jsonl`), scored by code against the database on facts, citations, grounding and refusals. Results, design and limits in [docs/agent.md](docs/agent.md).
+- Smoke set of 20 questions (`evals/agent/smoke.jsonl`, 20 of 20 pass) and 8 questions about statements in the news (`evals/agent/news.jsonl`, 7 of 8), scored by code against the database on facts, citations, grounding and refusals. Results, design and limits in [docs/agent.md](docs/agent.md).
 
 **Foundation**
 
@@ -85,7 +95,8 @@ What each source returned when checked, and every normalization, clustering and 
 - Docker with Docker Compose
 - Network access to `www.sec.gov` and `data.sec.gov` for loading filings, and to the news feeds in `feeds.yaml` and `api.gdeltproject.org` for news
 - Network access to `huggingface.co` once, for the search models (about 150 MB, kept in `MODEL_CACHE_DIR`); search and indexing then run offline
-- For guidance extraction and `ask` only: an API key of the configured LLM provider (Anthropic by default) and network access to its API
+- For guidance and statement extraction and `ask` only: an API key of the configured LLM provider (Anthropic by default) and network access to its API
+- For `ingest article-text` only: network access to the publishers' sites
 
 ## Quick start
 
@@ -115,6 +126,7 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap ingest news [--tickers NVDA,AMD]` | One poll of every feed in `feeds.yaml`, one summary line per feed: items, new articles, how many joined an existing story, duplicates and spam dropped, or `not modified`. With `--tickers`, only those companies' feeds. Exits quietly if another poll is still running. |
 | `talk-is-cheap ingest news --backfill --around-earnings [--days-before 1] [--days-after 3] [--tickers NVDA]` | Past news from GDELT for the days around each stored earnings release, newest first (recommended). Prints the number of windows and an estimate first, then every request and one line per window. Safe to stop at any point; re-running resumes. See "Long backfills" below. |
 | `talk-is-cheap ingest news --backfill --since 2024-01-01 [--until 2024-07-01] [--tickers NVDA]` | The same for every week from a start date |
+| `talk-is-cheap ingest article-text [--tickers NVDA] [--limit 100]` | Fetch the text of one article per story linked to a company (confidence 0.5 or more), newest stories first, for statement extraction: robots.txt first, one request per second per host, 15-second timeout. Prints each result, then per publisher: fetched, unavailable (by reason) and skipped. Incremental and resumable. |
 | `talk-is-cheap ingest news --reprocess` | Apply the current rules and `universe.yaml` to every stored article: delete spam, clean titles, rebuild near-duplicate clusters and company links. Run it after editing names, aliases or excluded phrases. |
 | `talk-is-cheap feeds [--backfill]` | Health of the polled feeds: status, last success, last new item, consecutive failures, articles, last error. With `--backfill`, the backfill sources instead: weeks fetched, the range they cover, articles and errors. |
 | `talk-is-cheap news NVDA [--since 2026-10-01] [--around-earnings FY2027Q2] [--min-confidence 0.5] [--limit 50]` | A company's news, newest first, one line per story with time (UTC), publisher and headline, and the other publishers of the same story. `--around-earnings` shows the 48 hours after that quarter's earnings release was filed (needs `ingest edgar` and `ingest filings`). Times marked `~` are when GDELT saw the article, not its publish time. |
@@ -124,6 +136,11 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap db-check` | Database connectivity, pgvector and migration status |
 
 | `talk-is-cheap extract guidance [--tickers NVDA] [--model claude-opus-5-5] [--missing-only] [--dry-run]` | Extract guidance from the outlook sections of earnings releases and CFO commentaries with the configured LLM, then refresh every verdict. One line per company: documents (up to date, reprocessed, cached, called), items, items dropped because their quote is not in the source, rows by verdict, tokens, cost; then the budget left. Incremental: documents already extracted with the same model, prompt version and text are skipped; a new post-processing version re-processes stored extractions from the cache. `--missing-only` extracts only documents never extracted, keeping those of another model. `--dry-run` prints the calls, tokens, estimated cost and budget left without calling. Calls that could exceed `LLM_COST_CAP` or `LLM_BUDGET_USD` are refused. Companies whose releases have no outlook are reported with 0 rows. |
+| `talk-is-cheap extract statements [--tickers NVDA] [--limit 5] [--model M] [--missing-only] [--dry-run]` | Extract forward-looking claims from candidate stories, then rebuild each company's outcomes. Prints the candidates per company, the calls, the most a run can cost and its typical cost, and the budget left, then one line per company: stories (up to date, reprocessed, cached, called), claims, management claims by type, outcomes, quotes dropped by grounding, tokens and cost. `--limit`: at most that many stories needing work per company. Incremental like `extract guidance`. |
+| `talk-is-cheap statements NVDA [--checkable] [--speaker "Jensen Huang"] [--all-attributions] [--limit 20]` | A company's management claims in the news (`all` for every company), newest first: ID, date (`~`: the article's), speaker, venue, claim, target, actual, verdict and comparison with formal guidance; then the quote (at most 40 words), the reasons, a plan's filing passage, and "reported by" with the link. `--all-attributions` adds claims by analysts, unnamed sources, reporters and unverified executives. |
+| `talk-is-cheap statements all --summary` | Per company: management claims by type, claims by others, hit rate (met or confirmed, of checkable claims with a verdict), beat/met/missed, confirmed/contradicted, pending, not comparable, claims needing review, and the share consistent with formal guidance. Verdicts count each forecast once, however many outlets reported it. |
+| `talk-is-cheap statements review ID --ok\|--wrong` | Record a review decision on a statement, kept by article and claim key, so it survives re-extraction |
+| `talk-is-cheap eval statements [--model M] [--dry-run] [--details]` | Claim recall and precision, attribution precision and recall, leaks, field accuracy (claim type, metric, period, figures) and grounding drops on `evals/statements/labels.jsonl`. Responses are cached, so re-running costs nothing. |
 | `talk-is-cheap spend` | LLM spending recorded in the ledger: total against `LLM_BUDGET_USD` and what remains, by command and by model, and notes of spending from before the ledger |
 | `talk-is-cheap guidance NVDA [--metric revenue] [--flagged] [--limit 20]` | A company's guidance (`all` for every company), newest issue first: row ID, quarter issued, target period, guided figure, actual as first reported, verdict, difference; then a REVIEW flag with the rule and numbers when the guided value is implausible against the prior period, the reason a row is pending or not comparable, whether the basis was assumed GAAP, the conditions, and the source URL with its character range. Ends with counts by verdict, leaving out rows that need review or were reviewed as wrong. `--flagged`: only flagged rows. |
 | `talk-is-cheap guidance review ID --ok\|--wrong` | Record a review decision on a row: `--ok` clears its plausibility flag, `--wrong` leaves it out of verdicts. Kept by filing and statement, so it survives re-extraction and re-processing. |
@@ -132,7 +149,7 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap eval agent [--dry-run] [--only ID,ID] [--model M] [--max-cost 0.30]` | The agent's smoke set: prints the estimate, runs each question on its own thread, scores facts, citations, grounding and refusals, prints a table and the total cost, and writes `evals/agent/results/<timestamp>.json`. `--dry-run` uses a scripted model and spends nothing. |
 | `talk-is-cheap eval guidance [--models claude-haiku-5-5,claude-opus-5-5] [--details]` | Precision, recall and F1 (all, numeric and qualitative items), exact figures, period accuracy, conditions captured, and tokens and cost per document, on `evals/guidance/labels.jsonl`. Responses are cached, so re-running costs nothing. |
 
-Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar`, `ingest filings`, `index` and, when an LLM key is configured, `extract guidance`. `make index` indexes new filing text and news; `make extract` extracts new guidance and refreshes verdicts; `make eval-retrieval` and `make eval-guidance` run the benchmarks; `make smoke-agent` runs the agent's smoke set (`make smoke-agent ARGS=--dry-run` at no cost) and `make agent-graph` redraws `docs/agent-graph.md`.
+Run `make` with no arguments to list the `make` shortcuts. `make ingest` runs `ingest edgar`, `ingest filings`, `index` and, when an LLM key is configured, `extract guidance`. `make index` indexes new filing text and news; `make extract` extracts new guidance and refreshes verdicts; `make eval-retrieval`, `make eval-guidance` and `make eval-statements` run the benchmarks (`make eval-statements ARGS=--dry-run` prints the calls and cost); `make smoke-agent` runs the agent's smoke set (`make smoke-agent ARGS=--dry-run` at no cost) and `make agent-graph` redraws `docs/agent-graph.md`.
 
 ## Adding companies or history
 
@@ -149,7 +166,16 @@ News needs a `name` per company, the name the press uses, and takes optional `al
     news_only: true     # collect news now; filings are not loaded until this is removed
 ```
 
-RSS feeds only carry recent items and their history cannot be fetched later, so list a company with `news_only: true` as soon as its news matters. `ingest edgar` and `ingest filings` skip news-only companies.
+RSS feeds only carry recent items and their history cannot be fetched later, so list a company with `news_only: true` as soon as its news matters.
+
+Statements in the news need the company's executives, with role and dates, taken from its 10-K, proxy statement and 8-K item 5.02 filings (cite them in a comment), and the names the press uses as `aliases`. One entry per role; omit `start` for a role held before the history start and `end` for one still held:
+
+```yaml
+    executives:
+      - {name: Jen-Hsun Huang, role: President and Chief Executive Officer, aliases: [Jensen Huang]}
+      - {name: Pat Gelsinger, role: Chief Executive Officer, end: 2024-12-01}
+      - {name: Lip-Bu Tan, role: Chief Executive Officer, start: 2025-03-18}
+``` `ingest edgar` and `ingest filings` skip news-only companies.
 
 ## Long backfills
 
@@ -236,11 +262,12 @@ All settings are environment variables. See `.env.example`.
 | `UNIVERSE_FILE` | `universe.yaml` | Companies, filing forms, history start date, and the names news is matched by |
 | `FEEDS_FILE` | `feeds.yaml` | News feeds and backfill sources |
 | `NEWS_USER_AGENT` | `talk-is-cheap/0.1 (news headline collector; metadata only)` | User-Agent sent to news feeds and GDELT |
+| `ARTICLE_USER_AGENT` | `talk-is-cheap/0.1 (research: reads executive quotes in company news, follows robots.txt, at most one request per second per site)` | User-Agent sent when fetching article text; its first word is the robots.txt user agent obeyed |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model for search embeddings. Changing it re-embeds everything on the next `index`. |
 | `RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | fastembed cross-encoder for `--mode rerank` |
 | `MODEL_CACHE_DIR` | `.cache/fastembed` | Where the models are downloaded |
 | `LLM_PROVIDER` | `anthropic` | LangChain chat-model integration for guidance extraction and the agent: `anthropic`, `openai` or `google_genai` (the last two need their `langchain-*` package) |
-| `LLM_MODEL` | `claude-haiku-5-5` | Model for guidance extraction and every node of the agent, the default for cost; `--model claude-opus-5-5` is more accurate ([docs/guidance.md](docs/guidance.md)) |
+| `LLM_MODEL` | `claude-haiku-5-5` | Model for guidance and statement extraction and every node of the agent, the default for cost; `--model claude-opus-5-5` is more accurate ([docs/guidance.md](docs/guidance.md)) |
 | `LLM_EFFORT` | `low` | Anthropic reasoning effort; empty for the model's default. Part of the model name in the cache and stored rows (`claude-opus-5-5@low`). |
 | `LLM_API_KEY` | unset | API key of the provider; `ANTHROPIC_API_KEY` is used when it is empty. Keep it in `.env`, never in the repository. |
 | `LLM_BUDGET_USD` | `2.50` | Hard cap on all LLM spending recorded in the ledger: a call that could take the total over it is refused, with what was spent and what remains |
@@ -276,6 +303,11 @@ All settings are environment variables. See `.env.example`.
 | `guidance_sources` | Where each statement is written: accession number, document, URL, section and character range, with the quoted text |
 | `llm_spend` | One row per paid LLM call: time, command, model, prompt version, tokens and cost, counted toward `LLM_BUDGET_USD`; and notes of earlier spending, not counted |
 | `guidance_reviews` | Review decisions (`ok`, `wrong`) by filing accession number and the statement's item key, with what was reviewed |
+| `article_texts` | The text of one article per linked story, for statement extraction: `ok` with the text and its content hash, or `unavailable` with the reason (robots.txt, HTTP status, no article text) |
+| `statement_extractions` | One per story and company extracted: model, prompt and post-processing version, hash of the prompt, the grounded claims (JSON), the claims dropped and why, tokens and cost |
+| `statements` | One row per claim: the article and story, quote and its character range in the text, speaker and role as written, attribution, the roster executive matched, whether it is management's, direct quote or paraphrase, venue, statement date (and whether it is the article's), claim type, the claim in brief, metric, segment, basis, measure, target period as written and resolved, figures and unit, direction, and a key that survives re-extraction |
+| `statement_outcomes` | Per management claim: verdict and reason, the actual as first reported (and the prior period's for directional claims), difference, plausibility check, review decision, comparison with formal guidance and the guidance row it was compared with, and a plan's filing passage |
+| `statement_reviews` | Review decisions (`ok`, `wrong`) by article, company and claim key |
 | `stock_splits` | Splits from `guidance/splits.yaml`: effective date and ratio, used so per-share guidance is not compared across a split |
 | `agent_runs` | One row per question `ask` or `eval agent` answered: question, thread, prompt version of each node, model, question type, tool calls (name, arguments, seconds, evidence ids, error), model calls and how many came from the cache, tokens, cost, seconds, revisions, verifier failures by check, whether the answer was verified, the answer |
 | `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations` | The agent's conversations by thread, LangGraph's Postgres checkpointer schema (created by migration 0009) |
@@ -284,7 +316,7 @@ All settings are environment variables. See `.env.example`.
 
 ```
 talk-is-cheap/
-├── universe.yaml            # companies, forms, history start, news names
+├── universe.yaml            # companies, forms, history start, news names, executive rosters
 ├── feeds.yaml               # news feeds and backfill sources
 ├── src/talk_is_cheap/
 │   ├── config.py            # typed settings
@@ -299,6 +331,7 @@ talk-is-cheap/
 │   │   ├── linking.py       # article-company links, method and confidence
 │   │   ├── store.py         # articles, feeds, clusters and links in the database
 │   │   ├── poll.py          # one poll of every feed
+│   │   ├── article_text.py  # article text per linked story: robots.txt, pacing, trafilatura
 │   │   ├── locks.py         # database locks against overlapping runs
 │   │   └── queries.py       # company news, earnings window, feed health
 │   ├── retrieval/
@@ -309,7 +342,7 @@ talk-is-cheap/
 │   │   └── evaluate.py      # retrieval benchmark: recall@k and MRR
 │   ├── spend.py             # LLM spending ledger and budget
 │   ├── agent/
-│   │   ├── tools.py         # the agent's tools over financials, guidance, search, SQL
+│   │   ├── tools.py         # the agent's tools over financials, guidance, statements, search, SQL
 │   │   ├── evidence.py      # citation ids, provenance, evidence items
 │   │   ├── sql.py           # run_sql: sqlglot validation, read-only execution
 │   │   ├── router.py        # routing rules, the out-of-scope answer
@@ -335,6 +368,19 @@ talk-is-cheap/
 │   │   ├── review.py        # review decisions on flagged rows
 │   │   └── splits.yaml      # verified stock splits
 │   ├── prompts/guidance_extraction/  # versioned prompts (v1.md)
+│   ├── statements/
+│   │   ├── candidates.py    # which stories go to the model, and their text
+│   │   ├── roster.py        # speakers matched to the executive roster on the statement date
+│   │   ├── schema.py        # what the model returns: claims as written
+│   │   ├── items.py         # grounded, parsed, resolved and attributed claims
+│   │   ├── extract.py       # prompts, incremental runs, claims per story
+│   │   ├── outcomes.py      # verdicts, directional checks, comparison with guidance
+│   │   ├── context.py       # a plan's filing passage, from the filing search
+│   │   ├── queries.py       # a company's statements with outcomes and guidance
+│   │   ├── review.py        # review decisions
+│   │   ├── evaluate.py      # extraction benchmark: recall, precision, attribution
+│   │   └── commands.py      # ingest article-text, extract/eval statements, statements
+│   ├── prompts/statement_extraction/  # versioned prompts (v1.md)
 │   ├── filings/
 │   │   ├── html_text.py     # filing HTML → structured text
 │   │   ├── sections.py      # press release tagging, 10-Q/10-K item splitting
@@ -350,13 +396,14 @@ talk-is-cheap/
 │   │   ├── metrics.yaml     # metrics and their XBRL concepts
 │   │   └── ingest.py        # load and store, per company
 │   └── db/
-│       ├── models.py        # filings and financial data, documents, sections, news tables
+│       ├── models.py        # filings, financials, documents, news, guidance, statements, agent runs
 │       ├── base.py, session.py, health.py
 ├── scripts/poll-news.sh     # one scheduled news poll, with log and overlap guard
 ├── alembic/                 # migrations
 ├── evals/retrieval/         # labeled questions for the retrieval benchmark
 ├── evals/guidance/          # hand-labeled outlook sections for the guidance benchmark
-├── evals/agent/             # agent smoke questions; results/ holds scored runs
+├── evals/statements/        # hand-labeled stories for the statements benchmark
+├── evals/agent/             # agent smoke and news questions; results/ holds scored runs
 ├── tests/                   # unit tests; integration/ uses a real database
 │   └── fixtures/            # trimmed real SEC filings; news/ holds trimmed real feeds
 ├── docker-compose.yml
@@ -373,4 +420,4 @@ make test-unit   # only tests that need no database
 
 Integration tests never touch the database in `DATABASE_URL`. Each test run drops, recreates and migrates its own database, `talkischeap_test` on the local Docker server, so tests start from an empty database, as in CI. Set `TEST_DATABASE_URL` in the shell to use another one; its name must end in `_test`. Tests read neither `.env` nor the application's variables from the shell: they run with the defaults, and tests that need a setting set it themselves.
 
-Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; polling, backfill and the news commands run end to end against the database with mocked feeds; chunking, indexing and search run without downloading a model, using a word-count tokenizer, a bag-of-words embedder and a word-overlap reranker (`tests/retrieval_fakes.py`); and guidance extraction never calls a real model: a fake model answers from fixed items (`tests/guidance_fakes.py`), and extraction, rows per filing, verdicts, caching and the commands run end to end against the database. The agent's tools are tested directly against the test database, `run_sql`'s rules against attempts to get around them, and the whole graph (routing, revisions, the verifier's checks, thread memory in the checkpointer tables, the cache, the tool-call cap, the budget and `ask`) with a scripted model (`agent/llm.py: ScriptedChat`); no test needs `ANTHROPIC_API_KEY`. Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.
+Tests never call the SEC or a news site. The edgartools adapter is tested against edgartools' own parser with SEC-shaped sample data, and ingestion is tested end to end against a real database with an in-memory source. Text conversion and section finding are tested on small fixtures trimmed from real SEC filings (public domain). News adapters are tested on feeds trimmed from the real ones; HTTP behaviour (304, 404, timeouts, malformed XML, GDELT's 429) is mocked with respx; clustering thresholds and linking rules are tested on real headline pairs, including false-match cases; polling, backfill and the news commands run end to end against the database with mocked feeds; chunking, indexing and search run without downloading a model, using a word-count tokenizer, a bag-of-words embedder and a word-overlap reranker (`tests/retrieval_fakes.py`); and guidance extraction never calls a real model: a fake model answers from fixed items (`tests/guidance_fakes.py`), and extraction, rows per filing, verdicts, caching and the commands run end to end against the database. Article fetching is tested with respx (robots.txt for each host and redirect, pacing with a fake clock, 403s and server errors, pages without article text); statement extraction with a fake model, end to end against the database: roster matching by name, alias, surname, bare title and dates, grounding drops, verdicts, directional outcomes, the comparison with guidance, reviews that survive re-extraction, the `statements` command and the agent's `get_statements`. The agent's tools are tested directly against the test database, `run_sql`'s rules against attempts to get around them, and the whole graph (routing, revisions, the verifier's checks, thread memory in the checkpointer tables, the cache, the tool-call cap, the budget and `ask`) with a scripted model (`agent/llm.py: ScriptedChat`); no test needs `ANTHROPIC_API_KEY`. Set `REQUIRE_DATABASE=1` to make integration tests fail, rather than skip, when the database is unreachable. CI sets it.

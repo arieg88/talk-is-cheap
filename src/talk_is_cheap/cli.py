@@ -1020,6 +1020,7 @@ async def _extract_guidance(
         pricing_for,
     )
     from talk_is_cheap.guidance.matching import load_split_config, sync_splits
+    from talk_is_cheap.guidance.schema import Extraction
 
     names = _company_names()
     if names is None:
@@ -1055,9 +1056,9 @@ async def _extract_guidance(
                 file=sys.stderr,
             )
             return 1
-        extractor: ExtractionModel
+        extractor: ExtractionModel[Extraction]
         if plan.calls == 0:
-            extractor = CacheOnlyModel(label)
+            extractor = CacheOnlyModel(label, Extraction)
         else:
             try:
                 extractor = build_model(settings, model)
@@ -1528,6 +1529,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--days-after", type=int, default=3, help="earnings window: days after (default 3)"
     )
 
+    article_text = sources.add_parser(
+        "article-text",
+        help="article text of one article per linked news story, for statement extraction",
+    )
+    article_text.add_argument("--tickers", type=_tickers, help=_TICKERS_HELP)
+    article_text.add_argument(
+        "--limit", type=int, help="fetch at most this many articles (newest stories first)"
+    )
+
     commands.add_parser("companies", help="list loaded companies")
 
     feeds = commands.add_parser("feeds", help="health of every polled news feed")
@@ -1642,6 +1652,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--details", action="store_true", help="also list missed, extra and wrong items"
     )
 
+    statements_eval = benchmarks.add_parser(
+        "statements",
+        help="claim recall and precision, attribution precision and field accuracy of "
+        "statement extraction on evals/statements/labels.jsonl",
+    )
+    statements_eval.add_argument(
+        "--labels", type=Path, default=Path("evals/statements/labels.jsonl"), help="labels file"
+    )
+    statements_eval.add_argument(
+        "--model", help="model of the configured provider (default LLM_MODEL)"
+    )
+    statements_eval.add_argument(
+        "--dry-run", action="store_true", help="print the calls and cost, and make no call"
+    )
+    statements_eval.add_argument(
+        "--details", action="store_true", help="every leak, miss, extra and field error"
+    )
     agent_eval = benchmarks.add_parser(
         "agent", help="the agent's smoke set: facts, citations, grounding and refusals"
     )
@@ -1691,6 +1718,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the calls, tokens and cost a run would take, and make no call",
     )
+    statements_extract = extracted.add_parser(
+        "statements",
+        help="forward-looking claims in news stories about the companies (incremental)",
+    )
+    statements_extract.add_argument("--tickers", type=_tickers, help=_TICKERS_HELP)
+    statements_extract.add_argument(
+        "--limit", type=int, help="at most this many stories per company that need work"
+    )
+    statements_extract.add_argument(
+        "--model", help="model of the configured provider (default LLM_MODEL)"
+    )
+    statements_extract.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="only stories never extracted; keep those extracted with another model",
+    )
+    statements_extract.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the candidates, calls, tokens and cost a run would take, and make no call",
+    )
 
     commands.add_parser(
         "spend", help="LLM spending recorded in the ledger, by command and model, and budget"
@@ -1737,6 +1785,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     decision.add_argument(
         "--wrong", action="store_true", help="with `review`: the row is wrong; leave it out"
+    )
+
+    said = commands.add_parser(
+        "statements",
+        help="forward-looking claims executives made in the news, against reported results "
+        "and formal guidance; or `statements review ID --ok|--wrong`",
+    )
+    said.add_argument("ticker", help="a ticker, `all`, or `review` followed by a statement ID")
+    said.add_argument("row", nargs="?", help="with `review`: the ID shown by `statements`")
+    said.add_argument(
+        "--checkable", action="store_true", help="only numeric forecasts and directional claims"
+    )
+    said.add_argument("--speaker", help="only claims by this speaker, e.g. 'Jensen Huang'")
+    said.add_argument(
+        "--all-attributions",
+        action="store_true",
+        help="also claims by analysts, unnamed sources, reporters and unverified executives",
+    )
+    said.add_argument(
+        "--summary",
+        action="store_true",
+        help="per company: claims by type, hit rate and consistency with guidance",
+    )
+    said.add_argument("--limit", type=int, help="rows shown (default all)")
+    said_decision = said.add_mutually_exclusive_group()
+    said_decision.add_argument(
+        "--ok", action="store_true", help="with `review`: the claim is right; clear its flag"
+    )
+    said_decision.add_argument(
+        "--wrong", action="store_true", help="with `review`: the claim is wrong; leave it out"
     )
 
     covered = commands.add_parser(
@@ -1789,6 +1867,10 @@ def _run(args: argparse.Namespace) -> int:
             return asyncio.run(_db_check())
         case "ingest" if args.source == "edgar":
             return asyncio.run(_ingest_edgar(args.tickers))
+        case "ingest" if args.source == "article-text":
+            from talk_is_cheap.statements.commands import article_text_command
+
+            return asyncio.run(article_text_command(args.tickers, args.limit))
         case "ingest" if args.source == "news" and args.reprocess:
             if args.backfill or args.tickers or args.since or args.until:
                 print("--reprocess takes no other options", file=sys.stderr)
@@ -1854,11 +1936,23 @@ def _run(args: argparse.Namespace) -> int:
                     args.results,
                 )
             )  # fmt: skip
+        case "eval" if args.benchmark == "statements":
+            from talk_is_cheap.statements.commands import eval_command
+
+            return asyncio.run(eval_command(args.labels, args.model, args.dry_run, args.details))
         case "eval" if args.benchmark == "guidance":
             return asyncio.run(_eval_guidance(args.labels, args.models, args.details))
         case "eval":
             return asyncio.run(
                 _eval_retrieval(args.questions, args.modes, args.filtered, args.details)
+            )
+        case "extract" if args.target == "statements":
+            from talk_is_cheap.statements.commands import extract_command
+
+            return asyncio.run(
+                extract_command(
+                    args.tickers, args.limit, args.dry_run, args.missing_only, args.model
+                )
             )
         case "extract":
             return asyncio.run(
@@ -1876,6 +1970,25 @@ def _run(args: argparse.Namespace) -> int:
                 print("--ok, --wrong and a row ID only go with `guidance review`", file=sys.stderr)
                 return 2
             return asyncio.run(_guidance(args.ticker, args.metric, args.limit, args.flagged))
+        case "statements" if args.ticker == "review":
+            from talk_is_cheap.statements.commands import review_command
+
+            if args.row is None or not (args.ok or args.wrong):
+                print("usage: talk-is-cheap statements review ID --ok|--wrong", file=sys.stderr)
+                return 2
+            return asyncio.run(review_command(args.row, "ok" if args.ok else "wrong"))
+        case "statements":
+            from talk_is_cheap.statements.commands import statements_command
+
+            if args.row is not None or args.ok or args.wrong:
+                print("--ok, --wrong and an ID only go with `statements review`", file=sys.stderr)
+                return 2
+            return asyncio.run(
+                statements_command(
+                    args.ticker, args.checkable, args.speaker, args.all_attributions,
+                    args.summary, args.limit,
+                )
+            )  # fmt: skip
         case "feeds":
             return asyncio.run(_feeds(args.backfill))
         case "news":

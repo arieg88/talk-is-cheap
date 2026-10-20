@@ -8,6 +8,25 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+class Executive(BaseModel):
+    """A member of management, and the dates they held the role. A statement counts as
+    management's only if the speaker held a role on its date."""
+
+    name: str
+    role: str
+    # Other names the press uses ("Jensen Huang" for "Jen-Hsun Huang").
+    aliases: list[str] = Field(default_factory=list)
+    start: date | None = None  # None: before the history the universe covers
+    end: date | None = None  # None: still in the role
+
+    @property
+    def names(self) -> list[str]:
+        return [self.name, *self.aliases]
+
+    def held_on(self, day: date) -> bool:
+        return (self.start is None or self.start <= day) and (self.end is None or day <= self.end)
+
+
 class UniverseCompany(BaseModel):
     ticker: str
     # The name the press uses ("Nvidia", not "NVIDIA CORP"). News needs it.
@@ -22,6 +41,8 @@ class UniverseCompany(BaseModel):
     # common words ("Apple") or heavily covered, whose unfiltered searches fill GDELT's
     # record limit with articles that are dropped anyway.
     gdelt_filter_publishers: bool = False
+    # Management by role and dates, for attributing statements in news.
+    executives: list[Executive] = Field(default_factory=list)
 
     @field_validator("ticker")
     @classmethod
@@ -40,6 +61,10 @@ class UniverseCompany(BaseModel):
     def names(self) -> list[str]:
         """The name followed by its aliases."""
         return ([self.name] if self.name else []) + self.aliases
+
+    def executives_on(self, day: date) -> list[Executive]:
+        """The executives who held their role on `day`."""
+        return [e for e in self.executives if e.held_on(day)]
 
 
 class Universe(BaseModel):

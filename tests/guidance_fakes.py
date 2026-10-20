@@ -20,6 +20,10 @@ class FakeModel:
     def name(self) -> str:
         return self._name
 
+    @property
+    def schema(self) -> type[Extraction]:
+        return Extraction
+
     async def extract(self, prompt: str) -> tuple[Extraction, Usage]:
         self.prompts.append(prompt)
         return self._respond(prompt), USAGE

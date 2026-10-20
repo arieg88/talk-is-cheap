@@ -48,6 +48,7 @@ from talk_is_cheap.guidance.llm import (
     complete,
 )
 from talk_is_cheap.guidance.periods import FiscalPeriod
+from talk_is_cheap.guidance.schema import Extraction
 
 _SHORTHAND = {"B": Decimal(10) ** 9, "M": Decimal(10) ** 6}
 
@@ -286,7 +287,7 @@ async def labeled_documents(
 
 async def evaluate(
     documents: Sequence[tuple[LabeledDocument, OutlookDocument, str]],
-    model: ExtractionModel,
+    model: ExtractionModel[Extraction],
     cache: ResponseCache,
     budget: Budget,
     *,

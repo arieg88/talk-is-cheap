@@ -11,6 +11,13 @@ Each question lists facts code can check, not wording:
   state its figures and its verdict, and that it was flagged when it was;
 - `no_guidance`: the answer must say the company gives no guidance;
 - `text`: the answer must use one of the given phrases and cite a filing with the section;
+- `statement`: a management claim reported in the news (ticker, metric, target period);
+  the answer must state its figure (of any matching claim), its verdict (unless
+  `outcome` is false: the question does not ask how the result compared), how it compares
+  with formal guidance when `comparison` is set, and "reported by", citing an article;
+- `no_management_claims`: the answer must say management made no such claim; when
+  `analyst_figure` is set, every sentence stating that figure must attribute it to an
+  analyst, not to the company;
 - `refuse`: the agent must decline without tool calls, and say "not investment advice"
   when `advice_note` is set.
 
@@ -80,16 +87,45 @@ REFUSAL = re.compile(
     re.IGNORECASE,
 )
 VERDICT_WORDS = {
-    "beat": r"\b(beat|exceed\w*|above|surpass\w*|topp\w*|outperform\w*)\b",
+    "beat": r"\b(beat\w*|exceed\w*|above|surpass\w*|topp\w*|outperform\w*)\b",
     "met": r"\b(met|within|in line|meet\w*)\b",
     "missed": r"\b(miss\w*|below|short|fell short)\b",
     "pending": r"\b(pending|not (?:yet )?reported)\b",
 }
 FLAG_WORDS = re.compile(r"\b(flag\w*|review\w*|plausibility)\b", re.IGNORECASE)
+STATEMENT_VERDICT_WORDS = {
+    **VERDICT_WORDS,
+    "pending": r"\b(pending|not (?:yet )?(?:been )?reported|yet to (?:be )?report\w*|"
+    r"not (?:yet )?available|has not (?:yet )?ended)\b",
+    "confirmed": r"\b(confirm\w*|did (?:rise|grow|increase|fall|decline)|rose|grew)\b",
+    "contradicted": r"\b(contradict\w*|did not|instead)\b",
+}
+COMPARISON_WORDS = {
+    "consistent": r"\b(consistent|in line|within|match\w*|same as|agree\w*)\b",
+    "differs": r"\b(differ\w*|outside|above|below|contradict\w*)\b",
+    "no_formal_guidance": (
+        r"\b(no (?:formal |matching |corresponding )?(?:\w+ ){0,3}guidance|not (?:part of|in) "
+        r"(?:its |the )?(?:formal )?guidance|not (?:been )?(?:formally )?guided|"
+        r"without formal guidance)\b"
+    ),
+}
+NO_MANAGEMENT = re.compile(
+    r"\b(no (?:\w+ ){0,3}(?:management|executive|company)|not (?:from|by) (?:management|the "
+    r"company|an? executive)|(?:management|executives?|the company) (?:has|have|did) not|"
+    r"(?:could not|couldn't|did not|didn't) find (?:any )?(?:\w+ ){0,2}(?:executive|management)|"
+    r"(?:didn't|did not|has not|have not) (?:said|say|made|given|provided|commented))\b",
+    re.IGNORECASE,
+)
+ANALYST_WORDS = re.compile(
+    r"\b(analysts?|IDC|Counterpoint|estimates?|consensus|Wall Street|research firm|forecasters?)\b",
+    re.IGNORECASE,
+)
 
 
 class Fact(BaseModel):
-    kind: str  # actual, derived, guidance, no_guidance, text, refuse
+    kind: (
+        str  # actual, derived, guidance, no_guidance, text, statement, no_management_claims, refuse
+    )
     ticker: str | None = None
     metric: str | None = None
     period: str | None = None
@@ -109,6 +145,12 @@ class Fact(BaseModel):
     section: str | None = None
     periods: str | None = None
     any: list[str] = Field(default_factory=list)
+    # statement: whether the answer must give the claim's verdict (when the question asks
+    # how the result compared), and how the claim compares with formal guidance
+    outcome: bool = True
+    comparison: str | None = None
+    # no_management_claims: a figure only an analyst gave
+    analyst_figure: float | None = None
     # refuse
     advice_note: bool = False
 
@@ -275,7 +317,72 @@ async def check_fact(session: AsyncSession, fact: Fact, result: RunResult) -> tu
         if not cited:
             problems.append(f"no cited {fact.section} section")
         return not problems, "; ".join(problems)
+    if fact.kind == "statement":
+        return await _check_statement(session, fact, result, answer)
+    if fact.kind == "no_management_claims":
+        problems = []
+        if not NO_MANAGEMENT.search(answer):
+            problems.append("does not say management made no such claim")
+        if fact.analyst_figure is not None:
+            figure = Decimal(str(fact.analyst_figure))
+            for sentence in sentences(answer):
+                if _states(sentence, figure, Decimal("0.005")) and not ANALYST_WORDS.search(
+                    sentence
+                ):
+                    problems.append(f"analyst figure {figure} not attributed to an analyst")
+        return not problems, "; ".join(problems)
     return False, f"unknown fact kind {fact.kind}"
+
+
+async def _check_statement(
+    session: AsyncSession, fact: Fact, result: RunResult, answer: str
+) -> tuple[bool, str]:
+    from talk_is_cheap.db.models import Statement, StatementOutcome
+
+    assert fact.ticker and fact.metric and fact.target
+    target = fact.target.upper().removeprefix("FY")
+    statement = (
+        select(Statement, StatementOutcome)
+        .join(StatementOutcome, StatementOutcome.statement_id == Statement.id)
+        .where(
+            Statement.ticker == fact.ticker,
+            Statement.metric == fact.metric,
+            Statement.management,
+            Statement.target_fiscal_year == int(target[:4]),
+        )
+    )
+    statement = statement.where(
+        Statement.target_fiscal_quarter == int(target[5])
+        if len(target) > 4
+        else Statement.target_fiscal_quarter.is_(None)
+    )
+    rows = [(s, o) for s, o in (await session.execute(statement)).all() if o.review != "wrong"]
+    if not rows:
+        return False, f"no stored management claim for {fact.ticker} {fact.metric} {fact.target}"
+    problems = []
+    figures = [v for s, _ in rows for v in (s.low, s.high, s.point) if v is not None]
+    if figures and not any(_states(answer, v, Decimal("0.005")) for v in figures):
+        problems.append("claimed figure not stated")
+    verdicts = {o.verdict for _, o in rows}
+    if (
+        fact.outcome
+        and verdicts & set(STATEMENT_VERDICT_WORDS)
+        and not any(
+            re.search(STATEMENT_VERDICT_WORDS[v], answer, re.IGNORECASE)
+            for v in verdicts
+            if v in STATEMENT_VERDICT_WORDS
+        )
+    ):
+        problems.append(f"verdict ({', '.join(sorted(verdicts))}) not stated")
+    if fact.comparison and not re.search(COMPARISON_WORDS[fact.comparison], answer, re.I):
+        problems.append(f"comparison with guidance ({fact.comparison}) not stated")
+    if "reported by" not in result.answer.lower():
+        problems.append('no "reported by"')
+    cited = {src["url"] for src in result.sources}
+    articles = await session.scalar(select(Article.id).where(Article.url.in_(cited)).limit(1))
+    if articles is None:
+        problems.append("no news article cited")
+    return not problems, "; ".join(problems)
 
 
 async def _guidance_row(session: AsyncSession, fact: Fact) -> Guidance | None:
@@ -450,6 +557,15 @@ def dry_run_script(question: SmokeQuestion) -> Any:
                 )
             elif fact.kind == "no_guidance":
                 calls.append(("get_guidance", {"ticker": fact.ticker}))
+            elif fact.kind == "statement":
+                calls.append(
+                    (
+                        "get_statements",
+                        {"ticker": fact.ticker, "metric": fact.metric, "period": fact.target},
+                    )
+                )
+            elif fact.kind == "no_management_claims":
+                calls.append(("get_statements", {"ticker": fact.ticker, "management_only": False}))
             elif fact.kind == "text":
                 calls.append(
                     (
@@ -466,6 +582,8 @@ def dry_run_script(question: SmokeQuestion) -> Any:
 
     def draft(items: Sequence[dict[str, Any]]) -> str:
         lines = []
+        if any(f.kind == "no_management_claims" for f in question.facts):
+            lines.append("Management made no such claim in the stored news.")
         for item in items:
             tool_lines = _draft_line(item, question)
             if tool_lines:
@@ -525,6 +643,8 @@ def _find(items: Sequence[dict[str, Any]], ticker: str | None, ref: Mapping[str,
 
 def _draft_line(item: Mapping[str, Any], question: SmokeQuestion) -> str:
     marker = f"[{item['id']}]"
+    if "claim_type" in item:
+        return _statement_line(item, marker)
     if "operation" in item:
         return f"The {item['operation'].replace('_', ' ')} is {item['display']} {marker}."
     if "metric" in item and "value" in item:
@@ -547,6 +667,37 @@ def _draft_line(item: Mapping[str, Any], question: SmokeQuestion) -> str:
         quoted = [s.rstrip(" .…") for s in sentences(item["text"]) if "|" not in s][:3]
         return " ".join(f"{s} {marker}." for s in quoted)
     return ""
+
+
+def _statement_line(item: Mapping[str, Any], marker: str) -> str:
+    """A statement as a careful draft writes it: who, what, when, the outcome and the
+    comparison with guidance, reported by the publisher."""
+    figure = item.get("as_written") or ""
+    if not item["management"]:
+        who = item.get("role") or item.get("speaker") or "an analyst"
+        return (
+            f"The only claim is by {who}, an analyst, not the company: {figure} "
+            f"(reported by {item['publisher']}) {marker}."
+        )
+    who = item.get("speaker") or "the company"
+    line = (
+        f"On {item['date']}, {who} said {item['ticker']} expected {item.get('metric', '')} "
+        f"of {figure} for {item.get('target', 'the period')} (reported by "
+        f"{item['publisher']}) {marker}."
+    )
+    verdict = item.get("verdict")
+    if verdict in ("beat", "met", "missed"):
+        line += f" The result {verdict} that figure {marker}."
+    elif verdict == "pending":
+        line += f" The period has not been reported yet, so it is pending {marker}."
+    comparison = item.get("guidance_comparison")
+    if comparison == "consistent":
+        line += f" It is consistent with formal guidance {marker}."
+    elif comparison == "differs":
+        line += f" It differs from formal guidance {marker}."
+    elif comparison == "no_formal_guidance":
+        line += f" There is no formal guidance for that period {marker}."
+    return line
 
 
 def _figure(value: Any, unit: str) -> str:

@@ -113,6 +113,8 @@ them. From the release's fiscal quarter:
 - "fiscal 2027", "FY27", "2026" name the year; "full year" without a number is the year
   still under way after the release (for a fourth-quarter release, the new year);
 - "the quarter ending December 31, 2026" is placed with the company's fiscal calendar;
+- "the September quarter" (Apple's wording) is the next fiscal quarter that ends in that
+  month, or the one in the named year ("the December quarter of 2026");
 - half years, nine months, "the rest of the year", and calendar years of companies whose
   fiscal year does not end in December are not resolved.
 

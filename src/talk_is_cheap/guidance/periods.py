@@ -2,7 +2,8 @@
 release that gave it.
 
 Releases name target periods in many ways: "third quarter of fiscal 2027", "Q4 FY26",
-"Q4'25", "the fourth quarter", "next quarter", "fiscal 2027", "full year", "2026". Years
+"Q4'25", "the fourth quarter", "next quarter", "fiscal 2027", "full year", "2026", "the
+September quarter". Years
 are fiscal years, labelled by the calendar year in which they end (Nvidia's fiscal 2027
 ends in January 2027), as companies name them. A quarter or year without a number is the
 next one after the release's quarter. Periods given by month ("the quarter ending
@@ -105,6 +106,13 @@ _ENDING = re.compile(
     r"(?P<month>[a-z]+)\.?\s+(?:(?P<day>\d{1,2}),?\s+)?(?P<year>\d{4})",
     re.IGNORECASE,
 )
+# "the September quarter", "the December quarter of 2026": the quarter ending in that month.
+_MONTH_QUARTER = re.compile(
+    r"\b(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
+    r"aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+quarter\b"
+    r"(?:\s*(?:of|,)?\s*(?P<year>(?:19|20)\d{2}))?",
+    re.IGNORECASE,
+)
 _BARE_YEAR = re.compile(r"(?<![\d$.,])(?P<year>(?:19|20)\d{2})(?![\d%])")
 _SHORT_FY = re.compile(r"\bfy\s*'?(?P<year>\d{2})\b|\bfiscal\s+'(?P<year2>\d{2})\b", re.IGNORECASE)
 
@@ -122,6 +130,10 @@ def resolve_period(
     ending = _ENDING.search(text)
     if ending:
         return _by_month(ending, calendar)
+
+    named_month = _MONTH_QUARTER.search(text)
+    if named_month:
+        return _by_quarter_month(named_month, issued, calendar)
 
     if _CALENDAR.search(text):
         if (calendar.month, calendar.day) < (12, 20):
@@ -202,3 +214,22 @@ def _by_month(match: re.Match[str], calendar: FiscalCalendar) -> FiscalPeriod | 
     if "quarter" not in match.group(0).lower() and "three months" not in match.group(0).lower():
         return FiscalPeriod(quarter.fiscal_year)
     return FiscalPeriod(quarter.fiscal_year, quarter.fiscal_quarter)
+
+
+def _by_quarter_month(
+    match: re.Match[str], issued: FiscalQuarter, calendar: FiscalCalendar
+) -> FiscalPeriod | None:
+    """The fiscal quarter ending in the named month: in the named calendar year, or else
+    the first such quarter after the release's quarter."""
+    month = _MONTHS.get(match["month"].lower().rstrip("."))
+    if month is None:
+        return None
+    if match["year"]:
+        quarter = calendar.quarter_of(date(int(match["year"]), month, 28))
+        return FiscalPeriod(quarter.fiscal_year, quarter.fiscal_quarter)
+    following = _following(issued)
+    for _ in range(4):
+        if calendar.quarter_end(following).month == month:
+            return FiscalPeriod(following.fiscal_year, following.fiscal_quarter)
+        following = _following(following)
+    return None

@@ -693,7 +693,7 @@ async def test_a_lookup_cites_its_filing_and_is_logged(
     assert logged is not None and logged.question_type == "lookup"
     assert logged.tool_calls[0]["name"] == "get_actuals"
     assert logged.tool_calls[0]["arguments"]["periods"] == ["FY2026Q2"]
-    assert logged.prompt_version.startswith("router/v1 planner/v1")
+    assert logged.prompt_version.startswith("router/v2 planner/v2")
     assert logged.llm_calls == 4 and logged.verifier_failures == {} and logged.verified
 
 

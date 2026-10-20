@@ -6,7 +6,9 @@ smoke set, and what it cannot do.
 
 The agent never does arithmetic in its head, never states a number that is not in a tool
 result, and checks its draft before it answers. Every claim cites an SEC filing URL or a
-news article link.
+news article link. What executives said in the news comes from `get_statements`, with who
+said it, the outcome and the comparison with formal guidance, always "reported by
+<publisher>" (section 2, [statements.md](statements.md)).
 
 ## 1. Graph
 
@@ -57,7 +59,11 @@ node), and the `final` answer with its `sources`.
    `MAX_TOOL_CALLS` (8) calls in a question, further calls are dropped and the model is
    told to answer from what it has. Its prompt: answer from tool results only, quote
    figures as tools give them, `compute` for every growth rate, margin, difference, sum
-   or ratio, cite every sentence with evidence ids (`[E3]`).
+   or ratio, cite every sentence with evidence ids (`[E3]`). What executives said comes
+   from `get_statements`, reported by the publisher, after the filing or guidance row
+   when one gives the same figure; only management claims are the company's; a verdict
+   or comparison with guidance is the tool's, never the model's; when a company gives no
+   guidance in its releases, that comes first, before anything news reports from calls.
 4. **Verifier**: code checks, then the model, only if they pass (section 3). A failure
    adds the feedback as a message and goes back to the executor, at most
    `MAX_REVISIONS` (2) times; then the answer keeps only the sentences that passed and
@@ -67,7 +73,8 @@ node), and the `final` answer with its `sources`.
    cites nothing new; otherwise the draft is used as it is. Then, in code:
    - a cited guidance row flagged by the plausibility check gets a note saying so and
      what the review decided, unless the answer already says it;
-   - a sentence about guidance that cites only news says "(reported by <publisher>)";
+   - a sentence about guidance, or any sentence citing an executive's statement from
+     `get_statements`, that cites only news says "(reported by <publisher>)";
    - `[E3]` markers become `[1]`, a computed result is cited by the items it was computed
      from, and items from the same document and place share a number;
    - a numbered source list with each filing or article URL goes underneath.
@@ -101,6 +108,7 @@ raising.
 | `resolve_company` | name or ticker | CIK, ticker, name, SEC name, fiscal year end, latest reported quarter; or the three closest matches and the covered tickers |
 | `get_actuals` | ticker, up to 6 metrics, up to 12 periods (`FY2027Q2`, `FY2026`, `latest`, `latest-1`, ...), vintage `first` or `latest` (default) | one item per metric and period: value, unit, a display form (`$96,221M`), form, filing date, accession number and the filing's primary document URL; derived quarters carry their derivation; what was not found is listed |
 | `get_guidance` | ticker, metric, issued period, target period, limit (10, at most 20) | guidance rows, newest issue first: low, high, point, unit, basis, measure, segment, conditions (200 characters), verdict and reason, actual as first reported, difference, the quote (300 characters) and the release URL; `review` when the plausibility check flagged the row and what the reviewer decided. Rows reviewed as wrong have no verdict and `counts_in_verdicts` false, as `guidance` treats them. For a company without guidance: one item stating it, citing its latest release |
+| `get_statements` | ticker, metric, period (a target `FY2026Q3`, a fiscal year with its quarters, or a calendar year `2025`), speaker, `management_only` (default true), `checkable_only`, limit (10, at most 20) | claims reported in the news, newest first: speaker and role (the roster's when verified), attribution and whether it is management's, venue, date (with a note when it is the article's), publisher, published date, the claim, a quote of at most 40 words, metric, target, figures and unit, direction; for management claims the verdict and its reason, the actual as first reported, the review state, the comparison with formal guidance and the guidance row's range and issue date, and a plan's filing passage. Claims by others say they are not scored. With nothing matching, it says whether claims by others exist. Provenance `news_report` |
 | `search_filings` | query, ticker, periods, document types, section types, k (6, at most 10) | `rerank` search (the retrieval default) over filing text: passage (700 characters), period, document type, section, and the document URL with the chunk's character range |
 | `search_news` | query, ticker, since, until, k | headline, publisher, date, summary (300 characters), link, and the article's link confidence for the ticker |
 | `compute` | `pct_change`, `difference`, `ratio`, `sum` or `margin`, over evidence ids (`E3`, or `E5.point` for a field) | the result as new evidence that cites its inputs. `pct_change` and `margin` are in percent. Operands of different units are refused for `pct_change`, `difference` and `sum` |
@@ -113,8 +121,9 @@ raising.
 - Nothing anywhere in its tree may write: INSERT, UPDATE, DELETE and MERGE (also inside a
   WITH clause), SELECT INTO, FOR UPDATE, DDL, COPY, SET and unparsed commands are refused.
 - Tables: only `companies`, `filings`, `financial_values`, `documents`, `sections`,
-  `guidance`, `guidance_sources`, `guidance_reviews`, `stock_splits`, `articles` and
-  `article_companies`, plus the query's own WITH names, and no schema but `public`. The
+  `guidance`, `guidance_sources`, `guidance_reviews`, `stock_splits`, `articles`,
+  `article_companies`, `statements` and `statement_outcomes`, plus the query's own WITH
+  names, and no schema but `public`. The
   ledger, agent runs, checkpoints, `pg_catalog` and `information_schema` are out.
 - Functions: an allowlist of aggregates, window, arithmetic, string, date and cast
   functions. Anything else is refused, including every function sqlglot does not know:
@@ -324,6 +333,91 @@ The second question names no company: the router keeps the thread's type by rule
 executor reads the earlier question and answer and asks `get_actuals` for `latest` and
 `latest-1`, and citation ids continue at E2.
 
+### With `get_statements` (prompts v2), 2026-10-20
+
+Router, planner, executor and answer prompts are `v2` (verifier `v2` unchanged): the
+router counts what management said about the future as a guidance question, the planner
+lists `get_statements`, the executor and answer prompts carry the rules of section 1.
+Run on the same 20 questions to check for regressions:
+
+| Question | Type | Facts | Cites | Grounded | Tools | Rev. | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| lookup-nvda-revenue | lookup | 1.00 | yes | yes | 1 | 0 | $0.0010 |
+| lookup-aapl-net-income | lookup | 1.00 | yes | yes | 1 | 0 | $0.0010 |
+| lookup-tsla-first-vs-latest | lookup | 1.00 | yes | yes | 2 | 1 | $0.0024 |
+| lookup-googl-eps | lookup | 1.00 | yes | yes | 1 | 0 | $0.0010 |
+| lookup-meta-capex | lookup | 1.00 | yes | yes | 1 | 0 | $0.0013 |
+| guidance-qcom-eps-flagged | guidance check | 1.00 | yes | yes | 2 | 0 | $0.0018 |
+| guidance-aapl-none | guidance check | 1.00 | yes | yes | 3 | 2 | $0.0061 |
+| guidance-nvda-revenue | guidance check | 1.00 | yes | yes | 2 | 0 | $0.0017 |
+| guidance-amd-revenue | guidance check | 1.00 | yes | yes | 2 | 0 | $0.0016 |
+| trend-nvda-revenue | trend | 1.00 | yes | yes | 6 | 1 | $0.0038 |
+| trend-amzn-operating-income | trend | 1.00 | yes | yes | 2 | 0 | $0.0017 |
+| trend-nflx-revenue-growth | trend | 1.00 | yes | yes | 2 | 1 | $0.0029 |
+| trend-meta-capex | trend | 1.00 | yes | yes | 6 | 0 | $0.0032 |
+| compare-msft-googl-revenue | comparison | 1.00 | yes | yes | 4 | 0 | $0.0026 |
+| compare-aapl-meta-gross-margin | comparison | 1.00 | yes | yes | 5 | 0 | $0.0033 |
+| compare-meta-googl-net-income | comparison | 1.00 | yes | yes | 6 | 0 | $0.0026 |
+| text-nvda-mdna | lookup | 1.00 | yes | yes | 1 | 1 | $0.0029 |
+| text-tsla-risk-musk | lookup | 1.00 | yes | yes | 2 | 1 | $0.0052 |
+| scope-buy-nvda | out of scope | 1.00 | yes | yes | 0 | 0 | $0.0000 |
+| scope-broadcom | out of scope | 1.00 | yes | yes | 0 | 0 | $0.0000 |
+
+**20 of 20 pass all four scores**, $0.0461 for 85 paid calls
+(`evals/agent/results/20261020T123800Z.json`). The first run with the new tool
+(`20261020T123442Z.json`, $0.0506) passed 19: asked for Apple's guidance, the agent led
+with the 9% to 11% growth Apple gives on its call, as reported by Yahoo Finance and
+TechCrunch, and never said that Apple's releases give none. The executor prompt then got
+its rule that the releases' lack of guidance comes first; the rerun passed.
+
+### News questions
+
+`evals/agent/news.jsonl`: 8 questions about what executives said in the news, with
+facts checked against `statements`:
+
+- `statement`: a management claim (ticker, metric, target period); the answer states its
+  figure, its verdict when the question asks how the result compared, the comparison
+  with formal guidance when the question asks it, and "reported by", citing an article;
+- `no_management_claims`: the answer says management made no such claim; an analyst's
+  figure, if stated, is attributed to the analyst.
+
+The questions: Qualcomm's statements against its formal guidance (both checkable ones
+consistent; the claim that differed was an extraction error reviewed as wrong), Meta's
+2025 capex (no management claim in stored news; the guidance rows and the 10-K answer
+it), Nvidia's revenue outlook for fiscal Q2 2025 and Q2 2027 (both beaten), Tesla's and
+Amazon's 2026 capex (pending), Salesforce's fiscal 2030 target (no formal guidance within
+45 days), and the growth of iPhone Duo shipments next year, where the only claim is
+IDC's.
+
+| Question | Facts | Cites | Grounded | Tools | Rev. | Cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| news-qcom-vs-guidance | 1.00 | yes | yes | 2 | 2 | $0.0119 |
+| news-meta-capex-2025 | 0.50 | yes | yes | 3 | 2 | $0.0044 |
+| news-nvda-q2fy25-revenue | 1.00 | yes | yes | 2 | 2 | $0.0060 |
+| news-nvda-q2fy27-revenue | 1.00 | yes | yes | 3 | 0 | $0.0021 |
+| news-tsla-capex-2026 | 1.00 | yes | yes | 2 | 0 | $0.0016 |
+| news-crm-fy2030-target | 1.00 | yes | yes | 2 | 1 | $0.0031 |
+| news-amzn-jassy-capex | 1.00 | yes | yes | 2 | 0 | $0.0018 |
+| news-aapl-duo-analyst-only | 1.00 | yes | yes | 4 | 2 | $0.0095 |
+
+**7 of 8 pass all four**, $0.0404 for the run with the final prompts
+(`20261020T124043Z.json`, scored again from the cache in `20261020T124306Z.json`). The
+Meta answer says no executive claim was found, lists the guided ranges and both actuals
+($72.2 billion with finance leases, $69.7 billion in the 10-K), but never says the
+guidance was beaten. No answer presented the IDC figure or any analyst's claim as
+Apple's or Qualcomm's.
+
+How the set and its checks changed, in order: the first run (`20261020T123144Z.json`,
+$0.0401) passed 4 of 8. Three failures were the checks' wording, not the answers: "made
+no stored management statements" and "could not find any Apple executive statement" did
+not match the no-claim pattern, "beaten" did not match the beat pattern, and "no formal
+FY2030 revenue guidance" did not match the no-guidance pattern; the patterns were
+widened. The facts of two questions asked for things the questions do not (a comparison
+with guidance for Nvidia's Q2 fiscal 2025 outlook; verdicts for Qualcomm's, Tesla's and
+Amazon's), and were narrowed with `outcome: false`. All of this is in the results files.
+The set is small, was drafted from the stored data without the project's own list of
+news questions, and was used to fix one prompt rule; there is no held-out set.
+
 ## 6. Known limitations
 
 - **The smoke set is small and was used to fix the prompt.** 20 questions, and the
@@ -341,9 +435,11 @@ executor reads the earlier question and answer and asks `get_actuals` for `lates
   attached to the wrong period or metric passes the code checks; only the model check can
   catch it. Small counts (up to 12) without a unit are not checked.
 - **Questions are answered from what is stored**: XBRL values of eleven metrics, guidance
-  extracted from releases, filing text and news headlines with feed summaries (never
-  full articles). Segment revenue, non-GAAP actuals and anything said only on earnings
-  calls are not available, and the agent says so rather than estimating.
+  extracted from releases, filing text, news headlines with feed summaries, and
+  executives' statements extracted from the article text of the stories that could be
+  fetched (a third of them: [statements.md](statements.md)). Segment revenue, non-GAAP
+  actuals and anything said on a call that no stored article reports are not available,
+  and the agent says so rather than estimating.
 - **`run_sql` results cannot be cited**, since rows have no URL; figures must come from
   `get_actuals` or `get_guidance`. Its table allowlist excludes `chunks` and
   `xbrl_facts`.

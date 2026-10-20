@@ -18,7 +18,7 @@ from talk_is_cheap.guidance.schema import ExtractedItem, Extraction
 
 # Raise when post-processing changes: stored extractions are then processed again from
 # their cached responses, without calling the model.
-PROCESSING_VERSION = "2"
+PROCESSING_VERSION = "3"
 
 
 @dataclass(frozen=True, slots=True)

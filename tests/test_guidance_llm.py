@@ -110,7 +110,11 @@ async def test_failed_answers_still_count_what_they_cost(tmp_path: Path) -> None
 async def test_cache_only_model_never_calls(tmp_path: Path) -> None:
     with pytest.raises(LlmError, match="no cached response"):
         await complete(
-            CacheOnlyModel("m"), "p", "v1", ResponseCache(tmp_path), Budget(Decimal(1), PRICING)
+            CacheOnlyModel("m", Extraction),
+            "p",
+            "v1",
+            ResponseCache(tmp_path),
+            Budget(Decimal(1), PRICING),
         )
 
 
@@ -168,7 +172,7 @@ async def test_langchain_models_use_structured_output_and_report_usage() -> None
             calls["schema"], calls["options"] = schema, options
             return Runnable()
 
-    model = LangChainModel(ChatModel(), "chat@low")
+    model = LangChainModel(ChatModel(), "chat@low", Extraction)
     extraction, usage = await model.extract("hello")
     assert (extraction, usage) == (EMPTY, Usage(120, 30))
     assert calls["schema"] is Extraction
@@ -183,7 +187,7 @@ async def test_langchain_models_use_structured_output_and_report_usage() -> None
             return Unparsed()
 
     with pytest.raises(LlmError) as raised:
-        await LangChainModel(BrokenChat(), "chat").extract("hello")
+        await LangChainModel(BrokenChat(), "chat", Extraction).extract("hello")
     assert raised.value.usage == Usage(120, 30)
 
 

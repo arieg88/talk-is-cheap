@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from importlib.resources import files
+from typing import Protocol
 
 import yaml
 from sqlalchemy import func, select
@@ -129,6 +130,36 @@ class ConfiguredSplit:
 
 
 Period = tuple[int, int | None]  # (fiscal year, fiscal quarter or None for the year)
+
+
+class Forecast(Protocol):
+    """A guided figure for a fiscal period: a guidance row, or an executive's numeric
+    forecast reported in the news (`statements/outcomes.py`), judged by the same rules."""
+
+    @property
+    def issued_at(self) -> date: ...
+    @property
+    def metric(self) -> str: ...
+    @property
+    def basis(self) -> str: ...
+    @property
+    def segment(self) -> str | None: ...
+    @property
+    def measure(self) -> str: ...
+    @property
+    def constant_currency(self) -> bool: ...
+    @property
+    def target_fiscal_year(self) -> int | None: ...
+    @property
+    def target_fiscal_quarter(self) -> int | None: ...
+    @property
+    def low(self) -> Decimal | None: ...
+    @property
+    def high(self) -> Decimal | None: ...
+    @property
+    def point(self) -> Decimal | None: ...
+    @property
+    def unit(self) -> str: ...
 
 
 class Actuals:
@@ -306,8 +337,8 @@ def item_key(row: Guidance) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
-def judge(row: Guidance, actuals: Actuals, splits: Sequence[Split], ticker: str) -> Verdict:
-    """The verdict of one guidance row."""
+def judge(row: Forecast, actuals: Actuals, splits: Sequence[Split], ticker: str) -> Verdict:
+    """The verdict of one guidance row or forecast."""
     reason = _not_comparable(row)
     if reason is not None:
         return Verdict("not_comparable", reason)
@@ -348,7 +379,7 @@ class Plausibility:
     note: str
 
 
-def check_plausibility(row: Guidance, actuals: Actuals, ticker: str) -> Plausibility:
+def check_plausibility(row: Forecast, actuals: Actuals, ticker: str) -> Plausibility:
     """Compare a comparable row's guided value with the prior period's actual (the
     quarter before a quarterly target, the year before a full-year one), as first
     reported and in the same measure."""
@@ -391,7 +422,7 @@ def check_plausibility(row: Guidance, actuals: Actuals, ticker: str) -> Plausibi
     return Plausibility("passed" if abs(guided - base) <= limit else "flagged", rule, note)
 
 
-def _plausibility_rule(row: Guidance) -> str:
+def _plausibility_rule(row: Forecast) -> str:
     if row.measure == "level":
         return "ratio" if row.metric in PLAUSIBLE_RATIO else "margin_points"
     if row.measure == "share_of_revenue":
@@ -399,7 +430,7 @@ def _plausibility_rule(row: Guidance) -> str:
     return "growth_points"
 
 
-def _reference(row: Guidance) -> Decimal:
+def _reference(row: Forecast) -> Decimal:
     """The guided value a row is measured by: its point, else the middle of its range,
     else its bound."""
     if row.point is not None:
@@ -421,7 +452,7 @@ def _show(value: Decimal, unit: str) -> str:
     return f"${value / 10**6:,.1f}M"
 
 
-def _not_comparable(row: Guidance) -> str | None:
+def _not_comparable(row: Forecast) -> str | None:
     if row.low is None and row.high is None and row.point is None:
         return "qualitative guidance"
     if row.metric == "other":
@@ -449,11 +480,11 @@ def _not_comparable(row: Guidance) -> str | None:
 
 
 def _actual(
-    row: Guidance, actuals: Actuals, period: Period, ticker: str
+    row: Forecast, actuals: Actuals, period: Period, ticker: str
 ) -> tuple[Decimal, str, date] | str | None:
     """The reported value in the guidance's unit, with the filing that completed it; None
     when not reported yet; a reason when it cannot be computed."""
-    current = _level(row.metric, actuals, period, ticker)
+    current = reported_level(row.metric, actuals, period, ticker)
     if current is None:
         return None
     value, accession_no, filed = current
@@ -468,7 +499,7 @@ def _actual(
         latest = max((filed, accession_no), (revenue.filed, revenue.accession_no))
         return value / revenue.value * 100, latest[1], latest[0]
     base_period = _base_period(row.measure, period)
-    base = _level(row.metric, actuals, base_period, ticker)
+    base = reported_level(row.metric, actuals, base_period, ticker)
     if base is None:
         return "no reported value for the comparison period"
     if base[0] == 0:
@@ -484,9 +515,11 @@ def _base_period(measure: str, period: Period) -> Period:
     return (year, quarter - 1) if quarter > 1 else (year - 1, 4)
 
 
-def _level(
+def reported_level(
     metric: str, actuals: Actuals, period: Period, ticker: str
 ) -> tuple[Decimal, str, date] | None:
+    """A guided metric's reported value for a period, as first reported (margins in
+    percent, Meta's capex with finance leases), and the filing that completed it."""
     if metric in _RATIO_METRICS:
         numerator = actuals.get(_RATIO_METRICS[metric], period)
         revenue = actuals.get("revenue", period)
@@ -505,7 +538,7 @@ def _level(
     return value, last.accession_no, last.filed
 
 
-def _compare(row: Guidance, actual: Decimal, accession_no: str, filed: date) -> Verdict:
+def _compare(row: Forecast, actual: Decimal, accession_no: str, filed: date) -> Verdict:
     low, high, point = row.low, row.high, row.point
     if low is not None and high is not None:
         reference = point if point is not None else (low + high) / 2
@@ -553,7 +586,7 @@ def _round(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.000001"))
 
 
-def _reported_name(row: Guidance) -> str:
+def _reported_name(row: Forecast) -> str:
     if row.metric in _RATIO_METRICS:
         return f"{_RATIO_METRICS[row.metric]} or revenue"
     return _LEVEL_METRICS[row.metric]

@@ -50,6 +50,8 @@ ALLOWED_TABLES = frozenset(
         "stock_splits",
         "articles",
         "article_companies",
+        "statements",
+        "statement_outcomes",
     }
 )
 

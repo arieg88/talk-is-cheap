@@ -83,3 +83,23 @@ def test_news_needs_names() -> None:
 def test_project_universe_names_every_company() -> None:
     universe = load_universe(PROJECT_ROOT / "universe.yaml")
     assert len(universe.select_news()) == 15
+
+
+def test_every_company_has_a_ceo_and_cfo_on_its_roster_today() -> None:
+    universe = load_universe(PROJECT_ROOT / "universe.yaml")
+    today = date(2026, 10, 20)
+    for company in universe.companies:
+        roles = " ".join(e.role.lower() for e in company.executives_on(today))
+        assert "chief executive" in roles or "co-chief executive" in roles, company.ticker
+        assert "financial" in roles, company.ticker
+        for executive in company.executives:
+            if executive.start and executive.end:
+                assert executive.start <= executive.end, executive.name
+
+
+def test_executives_hold_roles_between_their_dates() -> None:
+    company = load_universe(PROJECT_ROOT / "universe.yaml").companies[0]  # Apple
+    on = {e.name for e in company.executives_on(date(2024, 6, 1))}
+    later = {e.name for e in company.executives_on(date(2026, 10, 1))}
+    assert "Luca Maestri" in on and "Kevan Parekh" not in on
+    assert "Kevan Parekh" in later and "John Ternus" in later

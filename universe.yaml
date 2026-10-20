@@ -13,6 +13,10 @@
 #                    GDELT backfill searches only the publishers in feeds.yaml. Set for
 #                    names that are common words or heavily covered, whose unfiltered
 #                    searches return mostly articles that are dropped (docs/news.md).
+#   executives      management by role, with start and end dates (omitted: before the
+#                    history start, or still in the role). A statement in the news counts
+#                    as management's only if its speaker held a role on its date. Each
+#                    company's roster cites the filings it comes from.
 # Names and aliases match with their own capitalization, Title Case or UPPER CASE, as
 # whole words; a lower-case "apple" or "meta" is never a match.
 
@@ -34,50 +38,174 @@ companies:
     exclude_phrases: [Big Apple, Apple pie, Apple cider, Apple orchard, Apple Valley,
                       Apple Hospitality, Apple Bank, Candy Apple, Adam's Apple, Apple picking,
                       Apple festival]
+    # Proxy DEF 14A 0001308179-26-000008 (2026-01-08); 8-Ks 0001140361-24-038601 and
+    # 0001140361-25-000228 (CFO), 0001140361-25-027340 (COO), 0001140361-26-015711 (CEO).
+    executives:
+      - {name: Tim Cook, role: Chief Executive Officer, aliases: [Timothy Cook], end: 2026-08-31}
+      - {name: Tim Cook, role: Executive Chair, start: 2026-09-01}
+      - {name: John Ternus, role: Senior Vice President, Hardware Engineering, end: 2026-08-31}
+      - {name: John Ternus, role: Chief Executive Officer, start: 2026-09-01}
+      - {name: Luca Maestri, role: Chief Financial Officer, end: 2024-12-31}
+      - {name: Kevan Parekh, role: Chief Financial Officer, start: 2025-01-01}
+      - {name: Jeff Williams, role: Chief Operating Officer, aliases: [Jeffrey Williams], end: 2025-07-24}
+      - {name: Sabih Khan, role: Chief Operating Officer, start: 2025-07-25}
   - ticker: MSFT
     name: Microsoft
+    # 10-Ks 0001193125-26-323660 (2026-07-29) and 0000950170-24-087843 (2024-07-30).
+    executives:
+      - {name: Satya Nadella, role: Chairman and Chief Executive Officer}
+      - {name: Amy Hood, role: Chief Financial Officer, aliases: [Amy E. Hood]}
+      - {name: Judson Althoff, role: Chief Commercial Officer, aliases: [Judson B. Althoff], end: 2025-09-30}
+      - {name: Judson Althoff, role: "Chief Executive Officer, Microsoft Commercial Business", start: 2025-10-01}
+      - {name: Brad Smith, role: Vice Chair and President, aliases: [Bradford L. Smith]}
+      - {name: Takeshi Numoto, role: Chief Marketing Officer}
   - ticker: NVDA
     name: Nvidia
+    # 10-K 0001045810-26-000021 (2026-02-25); 8-K 0001045810-26-000060 (field operations).
+    executives:
+      - {name: Jen-Hsun Huang, role: President and Chief Executive Officer, aliases: [Jensen Huang]}
+      - {name: Colette Kress, role: Chief Financial Officer, aliases: [Colette M. Kress]}
+      - {name: Ajay Puri, role: "Executive Vice President, Worldwide Field Operations", aliases: [Ajay K. Puri]}
+      - {name: Nicholas Parker, role: "Executive Vice President, Worldwide Field Operations", start: 2026-07-01}
+      - {name: Debora Shoquist, role: "Executive Vice President, Operations"}
+      - {name: Timothy Teter, role: General Counsel, aliases: [Tim Teter]}
   - ticker: AMZN
     name: Amazon
     gdelt_filter_publishers: true
     exclude_phrases: [Amazon rainforest, Amazon River, Amazon basin, Amazon jungle,
                       Amazon region, Brazilian Amazon, Amazonian]
+    # 10-Ks 0001018724-26-000004 (2026-02-06) and 0001018724-24-000008 (2024-02-02).
+    executives:
+      - {name: Andy Jassy, role: President and Chief Executive Officer, aliases: [Andrew Jassy, Andrew R. Jassy]}
+      - {name: Brian Olsavsky, role: Chief Financial Officer, aliases: [Brian T. Olsavsky]}
+      - {name: Adam Selipsky, role: CEO Amazon Web Services, end: 2024-05-31}
+      - {name: Matt Garman, role: CEO Amazon Web Services, aliases: [Matthew Garman], start: 2024-06-01}
+      - {name: Doug Herrington, role: CEO Worldwide Amazon Stores, aliases: [Douglas Herrington]}
+      - {name: Jeff Bezos, role: Executive Chair, aliases: [Jeffrey Bezos]}
   - ticker: GOOGL
     name: Alphabet
     gdelt_filter_publishers: true
     aliases: [Google]
     # Boilerplate that Google News scrapes into some titles
     exclude_phrases: [Add Us On Google, preferred source on Google]
+    # Proxy DEF 14A 0001308179-26-000342 (2026-04-24); 8-K 0001193125-24-154725 (CFO).
+    executives:
+      - {name: Sundar Pichai, role: Chief Executive Officer}
+      - {name: Ruth Porat, role: Chief Financial Officer, end: 2024-07-30}
+      - {name: Ruth Porat, role: President and Chief Investment Officer}
+      - {name: Anat Ashkenazi, role: Chief Financial Officer, start: 2024-07-31}
+      - {name: Philipp Schindler, role: Chief Business Officer}
+      - {name: Kent Walker, role: "President, Global Affairs"}
   - ticker: META
     name: Meta
     gdelt_filter_publishers: true
     aliases: [Meta Platforms, Facebook]
     exclude_phrases: [Meta-analysis, Meta-analyses, Meta-review, Meta-data, Meta-model,
                       Meta-models, Meta-learning, Meta-study]
+    # Proxy DEF 14A 0001628280-26-025532 (2026-04-16); 8-K 0001628280-26-002429 (President).
+    executives:
+      - {name: Mark Zuckerberg, role: Chief Executive Officer}
+      - {name: Susan Li, role: Chief Financial Officer}
+      - {name: Javier Olivan, role: Chief Operating Officer}
+      - {name: Andrew Bosworth, role: Chief Technology Officer}
+      - {name: Dina Powell McCormick, role: President and Vice Chairman, start: 2026-01-12}
   - ticker: TSLA
     name: Tesla
     gdelt_filter_publishers: true
     exclude_phrases: [Nikola Tesla, Tesla coil]
+    # Proxy DEF 14A 0001104659-26-116700 (2026-10-19).
+    executives:
+      - {name: Elon Musk, role: Chief Executive Officer}
+      - {name: Vaibhav Taneja, role: Chief Financial Officer}
+      - {name: Tom Zhu, role: "Senior Vice President, APAC and Global Vehicle Manufacturing", aliases: [Xiaotong Zhu]}
   - ticker: AMD
     name: AMD
     aliases: [Advanced Micro Devices]
+    # Proxy DEF 14A 0001193125-26-129057 (2026-03-27); 8-Ks 0000002488-24-000115 (President)
+    # and 0000002488-26-000029 (executive officers).
+    executives:
+      - {name: Lisa Su, role: Chair and Chief Executive Officer}
+      - {name: Jean Hu, role: Chief Financial Officer}
+      - {name: Victor Peng, role: President, end: 2024-08-30}
+      - {name: Forrest Norrod, role: "Executive Vice President, Data Center Solutions"}
+      - {name: Mark Papermaster, role: Chief Technology Officer}
+      - {name: Phil Guido, role: Chief Commercial Officer}
+      - {name: Darren Grasby, role: Chief Sales Officer}
   - ticker: INTC
     name: Intel
     gdelt_filter_publishers: true
+    # Proxy DEF 14A 0000050863-26-000061 (2026-03-23); 8-Ks 0000050863-24-000173 (CEO),
+    # 0000050863-25-000024 (Intel Products), 0000050863-25-000036 (CEO),
+    # 0000050863-25-000149 (Intel Products).
+    executives:
+      - {name: Pat Gelsinger, role: Chief Executive Officer, aliases: [Patrick Gelsinger], end: 2024-12-01}
+      - {name: David Zinsner, role: Chief Financial Officer, aliases: [Dave Zinsner, David A. Zinsner]}
+      - {name: David Zinsner, role: Interim Co-Chief Executive Officer, start: 2024-12-01, end: 2025-03-17}
+      - {name: Michelle Johnston Holthaus, role: Interim Co-Chief Executive Officer, aliases: [Michelle Holthaus], start: 2024-12-01, end: 2025-03-17}
+      - {name: Michelle Johnston Holthaus, role: "CEO, Intel Products", aliases: [Michelle Holthaus], start: 2024-12-01, end: 2025-09-07}
+      - {name: Lip-Bu Tan, role: Chief Executive Officer, start: 2025-03-18}
   - ticker: CRM
     name: Salesforce
+    # 10-Ks 0001108524-26-000060 (2026-03-02) and 0001108524-24-000005 (2024-03-06); 8-Ks
+    # 0001193125-25-020881 (CFO) and 0001108524-26-000160 (engineering).
+    executives:
+      - {name: Marc Benioff, role: Chair and Chief Executive Officer}
+      - {name: Amy Weaver, role: President and Chief Financial Officer, end: 2025-03-20}
+      - {name: Robin Washington, role: President and Chief Operating and Financial Officer, start: 2025-03-21}
+      - {name: Brian Millham, role: President and Chief Operating Officer, end: 2025-03-20}
+      - {name: Parker Harris, role: "Co-Founder and Chief Technology Officer, Slack"}
+      - {name: Miguel Milano, role: President and Chief Revenue Officer}
+      - {name: Srinivas Tallapragada, role: President and Chief Engineering Officer, aliases: [Srini Tallapragada], end: 2026-08-06}
   - ticker: ORCL
     name: Oracle
     gdelt_filter_publishers: true
     exclude_phrases: [Oracle of Omaha]
+    # Proxy DEF 14A 0001193125-26-402816 (2026-09-25); 8-Ks 0001193125-25-210089 (CEOs) and
+    # 0001193125-26-142939 (CFO).
+    executives:
+      - {name: Larry Ellison, role: Executive Chair and Chief Technology Officer, aliases: [Lawrence Ellison, Lawrence J. Ellison]}
+      - {name: Safra Catz, role: Chief Executive Officer, end: 2025-09-21}
+      - {name: Safra Catz, role: Executive Vice Chair, start: 2025-09-22}
+      - {name: Clay Magouyrk, role: Chief Executive Officer, aliases: [Clayton Magouyrk], start: 2025-09-22}
+      - {name: Mike Sicilia, role: Chief Executive Officer, aliases: [Michael Sicilia], start: 2025-09-22}
+      - {name: Doug Kehring, role: "Executive Vice President, Operations; Principal Financial Officer", aliases: [Douglas Kehring], start: 2025-09-22}
+      - {name: Hilary Maxson, role: Chief Financial Officer, start: 2026-04-06}
   - ticker: ADBE
     name: Adobe
     gdelt_filter_publishers: true
+    # 10-K 0000796343-26-000003 (2026-01-15); 8-Ks 0000796343-26-000048 and
+    # 0000796343-26-000144 (CEO), 0000796343-26-000109 (CFO), 0000796343-25-000036.
+    executives:
+      - {name: Shantanu Narayen, role: Chair and Chief Executive Officer, end: 2026-11-30}
+      - {name: Anil Chakravarthy, role: "President, Digital Experience / Customer Experience Orchestration"}
+      - {name: Dan Durn, role: Chief Financial Officer, aliases: [Daniel Durn], end: 2026-06-15}
+      - {name: Steven Day, role: Interim Chief Financial Officer, aliases: [Steve Day], start: 2026-06-15}
+      - {name: David Wadhwani, role: "President, Digital Media"}
+      - {name: Scott Belsky, role: Chief Strategy Officer, end: 2025-03-15}
   - ticker: NFLX
     name: Netflix
+    # Proxy DEF 14A 0001193125-26-159286 (2026-04-16); 8-K 0001065280-25-000408.
+    executives:
+      - {name: Ted Sarandos, role: Co-Chief Executive Officer, aliases: [Theodore Sarandos]}
+      - {name: Greg Peters, role: Co-Chief Executive Officer, aliases: [Gregory Peters]}
+      - {name: Spencer Neumann, role: Chief Financial Officer}
+      - {name: Reed Hastings, role: Executive Chairman, end: 2025-04-16}
   - ticker: CSCO
     name: Cisco
     exclude_phrases: [Cisco Aguilar]
+    # 10-Ks 0000858877-26-000132 (2026-09-02) and 0000858877-24-000017 (2024-09-05); 8-Ks
+    # 0000858877-25-000021 (CFO) and 0000858877-25-000004 (go-to-market).
+    executives:
+      - {name: Chuck Robbins, role: Chair and Chief Executive Officer, aliases: [Charles Robbins, Charles H. Robbins]}
+      - {name: Scott Herren, role: Chief Financial Officer, aliases: [R. Scott Herren], end: 2025-07-26}
+      - {name: Mark Patterson, role: Chief Financial Officer, start: 2025-07-27}
+      - {name: Gary Steele, role: "President, Go-to-Market", end: 2025-04-25}
+      - {name: Jeetu Patel, role: President and Chief Product Officer, aliases: [Jeetendra Patel]}
+      - {name: Oliver Tuszik, role: "Executive Vice President, Global Sales"}
   - ticker: QCOM
     name: Qualcomm
+    # Proxy DEF 14A 0001104659-26-005781 (2026-01-22); 10-K 0000804328-25-000085.
+    executives:
+      - {name: Cristiano Amon, role: President and Chief Executive Officer, aliases: [Cristiano R. Amon]}
+      - {name: Akash Palkhiwala, role: Chief Financial Officer and Chief Operating Officer}
+      - {name: Alex Rogers, role: "President, Qualcomm Technology Licensing", aliases: [Alexander Rogers]}

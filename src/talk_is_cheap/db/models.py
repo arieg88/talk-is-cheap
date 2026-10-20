@@ -1,5 +1,5 @@
 """ORM models for companies, filings, financial data, filing text, news, the
-retrieval index, guidance and agent runs."""
+retrieval index, guidance, statements in the news and agent runs."""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -644,3 +644,210 @@ class AgentRun(Base):
     usage: Mapped[dict[str, object]] = mapped_column(JSONB)
     verified: Mapped[bool] = mapped_column(Boolean)
     answer: Mapped[str] = mapped_column(Text)
+
+
+class ArticleText(Base):
+    """The text of a news article, fetched for statement extraction and grounding only.
+
+    `status` is `ok` (text holds the extracted article body) or `unavailable` (the page
+    could not be read: robots.txt, a paywall, 403, a timeout, no extractable text), with
+    the reason. Answers quote at most a short span of it and link to the article.
+    """
+
+    __tablename__ = "article_texts"
+    __table_args__ = (CheckConstraint("status IN ('ok', 'unavailable')", name="status"),)
+
+    article_id: Mapped[int] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(Text)
+    http_status: Mapped[int | None] = mapped_column(SmallInteger)
+    text: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StatementExtraction(Base):
+    """The claims extracted from one news story (the text of one article of a dedup
+    cluster) about one company, by one model with one prompt version, after grounding and
+    post-processing. One row per article and company, replaced when extracted again;
+    articles extracted with no claims keep a row with none."""
+
+    __tablename__ = "statement_extractions"
+    __table_args__ = (
+        UniqueConstraint("article_id", "ticker", name="uq_statement_extractions_article"),
+        Index("ix_statement_extractions_ticker", "ticker"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"))
+    cluster_id: Mapped[int] = mapped_column(BigInteger)
+    ticker: Mapped[str] = mapped_column(String(16))
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str] = mapped_column(String(16))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    # statements/items.py: PROCESSING_VERSION. A newer one re-processes the cached response.
+    processing_version: Mapped[str] = mapped_column(String(16))
+    claims: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    dropped: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    input_tokens: Mapped[int] = mapped_column(Integer)
+    output_tokens: Mapped[int] = mapped_column(Integer)
+    cost: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    extracted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Statement(Base):
+    """One forward-looking claim reported in the news, with who made it.
+
+    `attribution` is the model's reading of who speaks, except that a `named_executive`
+    is checked against the roster in `universe.yaml` on the statement date: matched, it
+    names the roster entry (`executive_name`, `executive_role`); unmatched, it becomes
+    `unverified_executive`. Only `management` claims (a verified executive, a company
+    spokesperson or a company statement) are scored. Figures follow the guidance units:
+    dollars, dollars per share, percent.
+    """
+
+    __tablename__ = "statements"
+    __table_args__ = (
+        CheckConstraint(
+            "attribution IN ('named_executive', 'unverified_executive', "
+            "'company_spokesperson', 'company_statement', 'analyst', 'anonymous_source', "
+            "'reporter')",
+            name="attribution",
+        ),
+        CheckConstraint(
+            "venue IN ('interview', 'conference', 'earnings_call', 'press_release', "
+            "'social_media', 'other', 'unknown')",
+            name="venue",
+        ),
+        CheckConstraint(
+            "claim_type IN ('numeric_forecast', 'directional', 'plan', 'qualitative')",
+            name="claim_type",
+        ),
+        CheckConstraint(
+            "direction IS NULL OR direction IN ('increase', 'decrease', 'flat')",
+            name="direction",
+        ),
+        CheckConstraint("unit IN ('usd', 'pct', 'usd_per_share', 'other')", name="unit"),
+        Index("ix_statements_ticker_date", "ticker", "statement_date"),
+        Index("ix_statements_extraction_id", "extraction_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    extraction_id: Mapped[int] = mapped_column(
+        ForeignKey("statement_extractions.id", ondelete="CASCADE")
+    )
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"))
+    cluster_id: Mapped[int] = mapped_column(BigInteger)
+    ticker: Mapped[str] = mapped_column(String(16))
+    quote: Mapped[str] = mapped_column(Text)  # article_texts.text[char_start:char_end]
+    char_start: Mapped[int] = mapped_column(Integer)
+    char_end: Mapped[int] = mapped_column(Integer)
+    speaker_name: Mapped[str | None] = mapped_column(Text)  # as the article writes it
+    speaker_role: Mapped[str | None] = mapped_column(Text)
+    attribution: Mapped[str] = mapped_column(String(24))
+    executive_name: Mapped[str | None] = mapped_column(Text)  # the roster entry matched
+    executive_role: Mapped[str | None] = mapped_column(Text)
+    management: Mapped[bool] = mapped_column(Boolean)
+    is_direct_quote: Mapped[bool] = mapped_column(Boolean)
+    venue: Mapped[str] = mapped_column(String(16))
+    statement_date: Mapped[date] = mapped_column(Date)
+    # True when the article does not date the statement and its publish date is used.
+    date_from_article: Mapped[bool] = mapped_column(Boolean)
+    claim_type: Mapped[str] = mapped_column(String(24))
+    claim: Mapped[str] = mapped_column(Text)  # the claim in brief
+    metric: Mapped[str | None] = mapped_column(String(32))  # guidance metric vocabulary
+    metric_raw: Mapped[str | None] = mapped_column(Text)
+    segment: Mapped[str | None] = mapped_column(Text)
+    basis: Mapped[str] = mapped_column(String(16))
+    measure: Mapped[str] = mapped_column(String(24))
+    constant_currency: Mapped[bool] = mapped_column(Boolean, default=False)
+    period_text: Mapped[str | None] = mapped_column(Text)
+    target_fiscal_year: Mapped[int | None] = mapped_column(SmallInteger)
+    target_fiscal_quarter: Mapped[int | None] = mapped_column(SmallInteger)
+    low: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    high: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    point: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    unit: Mapped[str] = mapped_column(String(16))
+    value_text: Mapped[str | None] = mapped_column(Text)
+    direction: Mapped[str | None] = mapped_column(String(16))
+    # Hash of what makes the claim, so review decisions survive re-extraction.
+    item_key: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str] = mapped_column(String(16))
+
+
+class StatementOutcome(Base):
+    """A management claim compared with what the company reported, and with its formal
+    guidance (`statements/outcomes.py`). Rebuilt from `statements` at no cost.
+
+    `verdict`: numeric forecasts get the guidance verdicts (`beat`, `met`, `missed`,
+    `pending`, `not_comparable`); directional claims `confirmed`, `contradicted`,
+    `pending` or `not_comparable`; plans and qualitative claims `not_checkable`, plans
+    with the most relevant filing passage as context. `guidance_comparison`: `consistent`,
+    `differs` or `no_formal_guidance`, against guidance issued within 45 days.
+    """
+
+    __tablename__ = "statement_outcomes"
+    __table_args__ = (
+        CheckConstraint(
+            "verdict IN ('beat', 'met', 'missed', 'pending', 'not_comparable', 'confirmed', "
+            "'contradicted', 'not_checkable')",
+            name="verdict",
+        ),
+        CheckConstraint(
+            "guidance_comparison IN ('consistent', 'differs', 'no_formal_guidance')",
+            name="guidance_comparison",
+        ),
+        CheckConstraint(
+            "plausibility IS NULL OR plausibility IN ('passed', 'flagged', 'skipped')",
+            name="plausibility",
+        ),
+        CheckConstraint("review IS NULL OR review IN ('ok', 'wrong')", name="review"),
+    )
+
+    statement_id: Mapped[int] = mapped_column(
+        ForeignKey("statements.id", ondelete="CASCADE"), primary_key=True
+    )
+    verdict: Mapped[str] = mapped_column(String(16))
+    verdict_reason: Mapped[str | None] = mapped_column(Text)
+    actual: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    prior_actual: Mapped[Decimal | None] = mapped_column(AMOUNT)  # directional claims
+    difference: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    percent_difference: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    actual_accession_no: Mapped[str | None] = mapped_column(String(20))
+    actual_filed: Mapped[date | None] = mapped_column(Date)
+    plausibility: Mapped[str | None] = mapped_column(String(16))
+    plausibility_rule: Mapped[str | None] = mapped_column(String(32))
+    plausibility_note: Mapped[str | None] = mapped_column(Text)
+    review: Mapped[str | None] = mapped_column(String(8))
+    guidance_comparison: Mapped[str] = mapped_column(String(24))
+    guidance_id: Mapped[int | None] = mapped_column(ForeignKey("guidance.id", ondelete="SET NULL"))
+    guidance_note: Mapped[str | None] = mapped_column(Text)
+    # Plans: the most relevant filing passage, as context rather than a verdict.
+    context_url: Mapped[str | None] = mapped_column(Text)
+    context_label: Mapped[str | None] = mapped_column(Text)
+    context_text: Mapped[str | None] = mapped_column(Text)
+    matched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StatementReview(Base):
+    """A reviewer's decision on a statement, keyed by its article, company and item key,
+    so it survives re-extraction."""
+
+    __tablename__ = "statement_reviews"
+    __table_args__ = (
+        UniqueConstraint("article_id", "ticker", "item_key", name="uq_statement_reviews_item"),
+        CheckConstraint("decision IN ('ok', 'wrong')", name="decision"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"))
+    ticker: Mapped[str] = mapped_column(String(16))
+    item_key: Mapped[str] = mapped_column(String(64))
+    decision: Mapped[str] = mapped_column(String(8))
+    summary: Mapped[str] = mapped_column(Text)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

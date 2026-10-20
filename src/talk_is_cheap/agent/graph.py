@@ -569,8 +569,8 @@ _GUIDANCE_WORDS = re.compile(r"\b(guid\w*|outlook|expect\w*|forecast\w*)\b", re.
 
 
 def _with_notes(text: str, evidence: Mapping[str, Evidence]) -> str:
-    """Notes the answer must carry: guidance rows flagged for review, and guidance that
-    only news reports."""
+    """Notes the answer must carry: guidance rows flagged for review, and guidance or
+    statements that only news reports."""
     cited = [evidence[i] for i in cited_ids(text) if i in evidence]
     notes = []
     for item in cited:
@@ -586,7 +586,8 @@ def _with_notes(text: str, evidence: Mapping[str, Evidence]) -> str:
         ids = cited_ids(sentence)
         items = [evidence[i] for i in ids if i in evidence]
         news = [i for i in items if i["provenance"] == "news_report"]
-        if items and len(news) == len(items) and _GUIDANCE_WORDS.search(sentence):
+        statements = any(i["tool"] == "get_statements" for i in news)
+        if items and len(news) == len(items) and (statements or _GUIDANCE_WORDS.search(sentence)):
             publishers = ", ".join(
                 sorted({str(i["data"].get("publisher") or "a news outlet") for i in news})
             )
@@ -703,6 +704,12 @@ def source_label(item: Evidence) -> str:
     if tool == "search_news":
         publisher = data.get("publisher") or "news"
         return f'{publisher}, {data["published"]}: "{data["headline"]}" (reported by {publisher})'
+    if tool == "get_statements":
+        publisher = data.get("publisher") or "news"
+        who = data.get("speaker") or str(data.get("attribution", "")).replace("_", " ")
+        return (
+            f"{publisher}, {data['published']}: {who} on {data['date']} (reported by {publisher})"
+        )
     if tool == "resolve_company":
         return f"{data['ticker']} filings on SEC EDGAR"
     return str(tool)

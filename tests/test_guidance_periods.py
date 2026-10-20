@@ -76,6 +76,9 @@ def test_june_year_end(text: str, issued: FiscalQuarter, expected: FiscalPeriod 
         ("first quarter", FiscalQuarter(2026, 4), q(2027, 1)),
         ("the quarter ending December 27, 2026", FiscalQuarter(2026, 4), q(2027, 1)),
         ("fiscal year ending September 2027", FiscalQuarter(2026, 4), fy(2027)),
+        ("the September quarter", FiscalQuarter(2026, 3), q(2026, 4)),  # Apple's wording
+        ("the December quarter", FiscalQuarter(2026, 3), q(2027, 1)),
+        ("the December quarter of 2026", FiscalQuarter(2026, 2), q(2027, 1)),
     ],
 )
 def test_september_year_end(

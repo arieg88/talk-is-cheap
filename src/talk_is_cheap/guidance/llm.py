@@ -1,7 +1,9 @@
-"""The chat model behind guidance extraction, its response cache, and what calls cost.
+"""The chat model behind structured extraction (guidance from releases, statements from
+news), its response cache, and what calls cost.
 
 The model is any LangChain chat model that supports structured output, chosen by
-configuration (`LLM_PROVIDER`, `LLM_MODEL`). Responses are cached on disk by model,
+configuration (`LLM_PROVIDER`, `LLM_MODEL`), and returns an instance of the caller's
+Pydantic schema. Responses are cached on disk by model,
 prompt version and a hash of the request, so a re-run makes no call it has made before.
 Every call that is not cached is priced, and a run stops before a call that could take it
 over its cost cap.
@@ -18,6 +20,8 @@ from decimal import Decimal
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+
+from pydantic import BaseModel
 
 from talk_is_cheap.guidance.schema import Extraction
 
@@ -95,31 +99,39 @@ class CostCapReached(LlmError):
     """The next call could take the run over its cost cap."""
 
 
-class ExtractionModel(Protocol):
-    """Turns a prompt into guidance items. `name` identifies the model and its settings in
-    the cache and in stored rows."""
+class ExtractionModel[S: BaseModel](Protocol):
+    """Turns a prompt into an instance of `schema`. `name` identifies the model and its
+    settings in the cache and in stored rows."""
 
     @property
     def name(self) -> str: ...
 
-    async def extract(self, prompt: str) -> tuple[Extraction, Usage]: ...
+    @property
+    def schema(self) -> type[S]: ...
+
+    async def extract(self, prompt: str) -> tuple[S, Usage]: ...
 
 
-class LangChainModel:
+class LangChainModel[S: BaseModel]:
     """A LangChain chat model with structured output (`with_structured_output` and the
     provider's JSON-schema mode)."""
 
-    def __init__(self, chat_model: Any, name: str) -> None:
+    def __init__(self, chat_model: Any, name: str, schema: type[S]) -> None:
         self._name = name
+        self._schema = schema
         self._runnable = chat_model.with_structured_output(
-            Extraction, method="json_schema", include_raw=True
+            schema, method="json_schema", include_raw=True
         )
 
     @property
     def name(self) -> str:
         return self._name
 
-    async def extract(self, prompt: str) -> tuple[Extraction, Usage]:
+    @property
+    def schema(self) -> type[S]:
+        return self._schema
+
+    async def extract(self, prompt: str) -> tuple[S, Usage]:
         result = await self._runnable.ainvoke(prompt)
         raw = result["raw"]
         metadata = getattr(raw, "usage_metadata", None) or {}
@@ -130,21 +142,26 @@ class LangChainModel:
                 f"no structured answer (stop reason {stop}): {result['parsing_error']}", usage
             )
         parsed = result["parsed"]
-        return Extraction.model_validate(parsed), usage
+        return self._schema.model_validate(parsed), usage
 
 
-class CacheOnlyModel:
+class CacheOnlyModel[S: BaseModel]:
     """Answers only from the cache: for runs that need no new call, which then need no
     API key."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, schema: type[S]) -> None:
         self._name = name
+        self._schema = schema
 
     @property
     def name(self) -> str:
         return self._name
 
-    async def extract(self, prompt: str) -> tuple[Extraction, Usage]:
+    @property
+    def schema(self) -> type[S]:
+        return self._schema
+
+    async def extract(self, prompt: str) -> tuple[S, Usage]:
         raise LlmError("no cached response and no API key to make a call")
 
 
@@ -186,9 +203,16 @@ def build_chat_model(
     return chat_class(**options)
 
 
-def build_model(settings: "Settings", model: str | None = None) -> LangChainModel:
+def build_model(settings: "Settings", model: str | None = None) -> LangChainModel[Extraction]:
     """The configured chat model with structured output for guidance extraction."""
-    return LangChainModel(build_chat_model(settings, model), model_label(settings, model))
+    return build_structured_model(settings, Extraction, model)
+
+
+def build_structured_model[S: BaseModel](
+    settings: "Settings", schema: type[S], model: str | None = None
+) -> LangChainModel[S]:
+    """The configured chat model, answering with an instance of `schema`."""
+    return LangChainModel(build_chat_model(settings, model), model_label(settings, model), schema)
 
 
 def pricing_for(model_name: str, settings: "Settings") -> Pricing | None:
@@ -200,8 +224,8 @@ def pricing_for(model_name: str, settings: "Settings") -> Pricing | None:
 
 
 @dataclass(frozen=True, slots=True)
-class Response:
-    extraction: Extraction
+class Response[S: BaseModel]:
+    extraction: S
     usage: Usage
     cost: Decimal  # what the call cost when it was made
     cached: bool
@@ -236,18 +260,20 @@ class ResponseCache:
         temporary.write_text(json.dumps(data, indent=1), encoding="utf-8")
         temporary.replace(path)
 
-    def get(self, model: str, prompt_version: str, prompt: str) -> Response | None:
+    def get[S: BaseModel](
+        self, model: str, prompt_version: str, prompt: str, schema: type[S]
+    ) -> Response[S] | None:
         data = self.read(model, prompt_version, prompt)
         if data is None:
             return None
         return Response(
-            Extraction.model_validate(data["extraction"]),
+            schema.model_validate(data["extraction"]),
             Usage(data["input_tokens"], data["output_tokens"]),
             Decimal(data["cost"]),
             cached=True,
         )
 
-    def put(self, model: str, prompt_version: str, prompt: str, response: Response) -> None:
+    def put(self, model: str, prompt_version: str, prompt: str, response: Response[Any]) -> None:
         data = {
             "model": model,
             "prompt_version": prompt_version,
@@ -338,18 +364,20 @@ class Budget:
         return cost
 
 
-async def complete(
-    model: ExtractionModel,
+async def complete[S: BaseModel](
+    model: ExtractionModel[S],
     prompt: str,
     prompt_version: str,
     cache: ResponseCache,
     budget: Budget,
-) -> Response:
-    """The cached response for this request, or a new call within the budget."""
-    found = cache.get(model.name, prompt_version, prompt)
+    estimate: Usage | None = None,
+) -> Response[S]:
+    """The cached response for this request, or a new call within the budget. A call
+    reserves `estimate` (default: `estimate_usage(prompt)`) until it returns."""
+    found = cache.get(model.name, prompt_version, prompt, model.schema)
     if found is not None:
         return found
-    reservation = budget.reserve(prompt)
+    reservation = budget.reserve_usage(estimate or estimate_usage(prompt))
     try:
         extraction, usage = await model.extract(prompt)
     except LlmError as exc:

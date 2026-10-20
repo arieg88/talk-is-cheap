@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from talk_is_cheap.db.models import Guidance, GuidanceSource
     from talk_is_cheap.retrieval.encoders import Embedder, Reranker
     from talk_is_cheap.retrieval.search import SearchResult
+    from talk_is_cheap.statements.queries import StatementRow
 
 PASSAGE_CHARS = 700
 QUOTE_CHARS = 300
@@ -189,6 +190,26 @@ class SearchNewsInput(BaseModel):
     since: date | None = None
     until: date | None = Field(default=None, description="inclusive")
     k: int = Field(default=6, ge=1, le=10)
+
+
+class GetStatementsInput(BaseModel):
+    ticker: str
+    metric: GuidanceMetric | None = None
+    period: str | None = Field(
+        default=None,
+        description="the target period 'FY2025' or 'FY2026Q3' (a year includes its "
+        "quarters), or a calendar year '2025' of the statement or its target",
+    )
+    speaker: str | None = Field(default=None, description="a name, e.g. 'Jensen Huang' or 'Huang'")
+    management_only: bool = Field(
+        default=True,
+        description="true: only claims by executives verified against the roster, "
+        "spokespeople and the company; false: also analysts, unnamed sources and reporters",
+    )
+    checkable_only: bool = Field(
+        default=False, description="only numeric forecasts and directional claims"
+    )
+    limit: int = Field(default=10, ge=1, le=20)
 
 
 class ComputeInput(BaseModel):
@@ -354,6 +375,63 @@ async def get_guidance(ctx: ToolContext, args: GetGuidanceInput) -> ToolOutput:
     return ToolOutput(content, items)
 
 
+async def get_statements(ctx: ToolContext, args: GetStatementsInput) -> ToolOutput:
+    """Forward-looking claims about a company reported in the news (interviews,
+    conferences, earnings calls quoted by reporters, statements, posts), newest first:
+    who said it (speaker, role, attribution), venue, date, publisher and article link, a
+    short quote, the claim's figures and target period; for management's claims the
+    outcome against the result as first reported (beat, met, missed, pending,
+    not_comparable; directional: confirmed, contradicted; plans: not_checkable, with a
+    filing passage as context) and how it compares with formal guidance issued within 45
+    days (consistent, differs, no_formal_guidance). News is secondary: say "reported by
+    <publisher>", and prefer filings and guidance for figures they also give."""
+    from talk_is_cheap.statements.queries import company_statements
+
+    async with ctx.sessions() as session:
+        company = await _company(session, args.ticker)
+        rows = await company_statements(
+            session,
+            company.ticker,
+            metric=args.metric,
+            period=args.period,
+            speaker=args.speaker,
+            management_only=args.management_only,
+            checkable_only=args.checkable_only,
+        )
+        if not rows:
+            others = 0
+            if args.management_only:
+                others = len(
+                    await company_statements(
+                        session,
+                        company.ticker,
+                        metric=args.metric,
+                        period=args.period,
+                        speaker=args.speaker,
+                        management_only=False,
+                    )
+                )
+            content: dict[str, Any] = {
+                "evidence": [],
+                "not_found": f"no {'management ' if args.management_only else ''}claims "
+                "in stored news match",
+            }
+            if others:
+                content["claims_by_others"] = (
+                    f"{others} matching claims by analysts, unnamed sources or reporters; "
+                    "they are not management's (management_only=false lists them)"
+                )
+            return ToolOutput(content, [])
+    items = [
+        ctx.evidence.add("news_report", r.url, "get_statements", _statement_data(r))
+        for r in rows[: args.limit]
+    ]
+    content = {"evidence": items}
+    if len(rows) > args.limit:
+        content["more_claims"] = len(rows) - args.limit
+    return ToolOutput(content, items)
+
+
 async def search_filings(ctx: ToolContext, args: SearchFilingsInput) -> ToolOutput:
     """Search the text of earnings releases, CFO commentaries, 10-Qs and 10-Ks (hybrid
     keyword and vector search, reranked). Use for explanations (MD&A, section `mdna`),
@@ -487,10 +565,10 @@ async def compute(ctx: ToolContext, args: ComputeInput) -> ToolOutput:
 
 async def run_sql(ctx: ToolContext, args: RunSqlInput) -> ToolOutput:
     """One read-only SELECT over companies, filings, financial_values, documents,
-    sections, guidance, guidance_sources, guidance_reviews, stock_splits, articles and
-    article_companies; at most 200 rows, 5 seconds. For questions the other tools cannot
-    answer (counts, rankings). Rows have no citation URL: cite figures from get_actuals
-    or get_guidance."""
+    sections, guidance, guidance_sources, guidance_reviews, stock_splits, articles,
+    article_companies, statements and statement_outcomes; at most 200 rows, 5 seconds.
+    For questions the other tools cannot answer (counts, rankings). Rows have no citation
+    URL: cite figures from get_actuals, get_guidance or get_statements."""
     try:
         async with ctx.engine.connect() as connection:
             result = await sql.run_sql(
@@ -521,6 +599,7 @@ TOOLS: Mapping[str, tuple[ToolFunction, type[BaseModel]]] = {
     "resolve_company": (resolve_company, ResolveCompanyInput),
     "get_actuals": (get_actuals, GetActualsInput),
     "get_guidance": (get_guidance, GetGuidanceInput),
+    "get_statements": (get_statements, GetStatementsInput),
     "search_filings": (search_filings, SearchFilingsInput),
     "search_news": (search_news, SearchNewsInput),
     "compute": (compute, ComputeInput),
@@ -740,6 +819,94 @@ def _guidance_data(
         data["review"] = review
     if sources:
         data["quote"] = _cut(sources[0].quote, QUOTE_CHARS)
+    return data
+
+
+def _statement_data(found: "StatementRow") -> dict[str, Any]:
+    from talk_is_cheap.statements.commands import short_quote
+    from talk_is_cheap.statements.queries import target_label
+
+    row, outcome = found.statement, found.outcome
+    unit = {"usd": "USD", "usd_per_share": "USD/shares", "pct": "percent"}.get(row.unit, row.unit)
+    data: dict[str, Any] = {
+        "ticker": row.ticker,
+        "date": row.statement_date.isoformat(),
+        "speaker": row.executive_name or row.speaker_name,
+        "role": row.executive_role or row.speaker_role,
+        "attribution": row.attribution,
+        "management": row.management,
+        "venue": row.venue,
+        "publisher": found.publisher,
+        "published": found.published_at.date().isoformat(),
+        "claim": row.claim,
+        "claim_type": row.claim_type,
+        "quote": short_quote(row.quote),
+        "provenance_note": f"reported by {found.publisher or 'a news outlet'}",
+    }
+    if row.date_from_article:
+        data["date_note"] = "the article's date; the article does not date the statement"
+    if row.attribution == "unverified_executive":
+        data["attribution_note"] = "named as an executive, but not on the roster on that date"
+    for name, value in (
+        ("metric", row.metric),
+        ("segment", row.segment),
+        ("target", target_label(row)),
+        ("as_written", row.value_text),
+        ("direction", row.direction),
+    ):
+        if value:
+            data[name] = value
+    if row.basis != "unspecified":
+        data["basis"] = row.basis
+    for figure, amount in (("low", row.low), ("high", row.high), ("point", row.point)):
+        if amount is not None:
+            data[figure] = float(amount)
+    if any(v is not None for v in (row.low, row.high, row.point)):
+        data["unit"] = unit
+    if outcome is None:
+        if not row.management:
+            data["outcome"] = "not scored: not a management claim"
+        return data
+    data["verdict"] = outcome.verdict if outcome.review != "wrong" else None
+    if outcome.verdict_reason:
+        data["verdict_reason"] = outcome.verdict_reason
+    if outcome.actual is not None:
+        data["actual_first_reported"] = float(outcome.actual)
+    if outcome.prior_actual is not None:
+        data["prior_period_actual"] = float(outcome.prior_actual)
+    if outcome.difference is not None and row.claim_type == "numeric_forecast":
+        data["difference"] = float(outcome.difference)
+    if outcome.plausibility == "flagged":
+        state = {None: "needs review", "ok": "reviewed as ok", "wrong": "reviewed as wrong"}
+        data["review"] = f"flagged ({outcome.plausibility_note}); {state[outcome.review]}"
+    elif outcome.review == "wrong":
+        data["review"] = "reviewed as wrong: left out of outcome counts"
+    if outcome.review == "wrong":
+        return data  # an extraction error: neither a verdict nor a comparison
+    data["guidance_comparison"] = outcome.guidance_comparison
+    if outcome.guidance_note:
+        data["guidance_note"] = outcome.guidance_note
+    guidance = found.guidance
+    if guidance is not None:
+        data["formal_guidance"] = {
+            "issued_on": guidance.issued_at.isoformat(),
+            "basis": guidance.basis,
+            **{
+                k: float(v)
+                for k, v in (
+                    ("low", guidance.low),
+                    ("high", guidance.high),
+                    ("point", guidance.point),
+                )
+                if v is not None
+            },
+        }
+    if outcome.context_url:
+        data["filing_context"] = {
+            "label": outcome.context_label,
+            "url": outcome.context_url,
+            "text": _cut(outcome.context_text or "", 300),
+        }
     return data
 
 

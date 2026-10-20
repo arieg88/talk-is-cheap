@@ -3,8 +3,9 @@
 How `talk-is-cheap ingest news` collects headlines, how articles are deduplicated and
 linked to companies, and what each source returned when it was checked.
 
-Only metadata is stored: headline, the feed's own summary, link, publisher and time. Full
-article pages are never downloaded.
+Polling and backfill store metadata only: headline, the feed's own summary, link,
+publisher and time. The body of one article per linked story is fetched separately, for
+statement extraction only (section 8).
 
 ## 1. How it works
 
@@ -271,3 +272,27 @@ fetched, average time per window, new articles), and loses at most the window in
 progress, whose stored articles are kept and found again as duplicates on the next run.
 A window that fails 30 times in a row is skipped and fetched by the next run (section
 2); a company whose window fails with another error gets no further windows in that run.
+
+## 8. Article text
+
+`talk-is-cheap ingest article-text [--tickers NVDA] [--limit 100]` (`news/article_text.py`)
+fetches the text of one article per story (dedup cluster) linked to a company with
+confidence 0.5 or more, into `article_texts`, for the claims executives make in the news
+([statements.md](statements.md)). It is a separate command and module: polling, backfill,
+clustering and linking are unchanged.
+
+- **Which article:** a direct link before a Google News link (Google's robots.txt
+  forbids following its redirects), then the longest summary, then the earliest; a story
+  whose article is unavailable for good moves on to its next article.
+- **Rules:** robots.txt of every host (and of every host a redirect leads to) is read
+  first and obeyed for the first word of `ARTICLE_USER_AGENT`; at most one request per
+  second per host, or its Crawl-delay; 15-second timeout; no retries within a run.
+- **Outcomes:** `ok` with the text, or `unavailable` with the reason. 401, 402, 403, 404,
+  410, 451, robots.txt refusals and pages without article text are final; timeouts,
+  connection and server errors, and unreadable robots.txt files are tried by the next
+  run. Each result is stored as it arrives, so a run can be stopped and resumed.
+- **Summary:** one line per publisher: fetched, unavailable (by reason) and skipped
+  (text stored, or nothing left to try).
+
+Results on 2026-10-20 are in [statements.md](statements.md), section 1: text for 538 of
+2,371 stories; 1,560 stories have only a Google News link.

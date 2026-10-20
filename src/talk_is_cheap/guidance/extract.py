@@ -58,6 +58,7 @@ from talk_is_cheap.guidance.llm import (
     estimate_usage,
 )
 from talk_is_cheap.guidance.matching import item_key, refresh_verdicts
+from talk_is_cheap.guidance.schema import Extraction
 
 PROMPT_NAME = "guidance_extraction"
 PROMPT_VERSION = "v1"
@@ -239,7 +240,7 @@ async def plan_company(
             model = existing.model
             processed = existing.processing_version == PROCESSING_VERSION
             status = "up_to_date" if processed else "reprocess"
-        elif cache.get(model_name, prompt_version, prompt) is not None:
+        elif cache.get(model_name, prompt_version, prompt, Extraction) is not None:
             status = "cached"
         else:
             status = "call"
@@ -281,7 +282,7 @@ class ExtractResult:
 
 async def extract_guidance(
     sessions: async_sessionmaker[AsyncSession],
-    model: ExtractionModel,
+    model: ExtractionModel[Extraction],
     cache: ResponseCache,
     budget: Budget,
     *,
@@ -363,12 +364,12 @@ async def extract_guidance(
     return results
 
 
-_Outcome = tuple[Response, list[GuidanceItem], list[Dropped]] | BaseException
+_Outcome = tuple[Response[Extraction], list[GuidanceItem], list[Dropped]] | BaseException
 
 
 async def _run(
     planned: Sequence[PlannedDocument],
-    model: ExtractionModel,
+    model: ExtractionModel[Extraction],
     cache: ResponseCache,
     budget: Budget,
     prompt_version: str,
@@ -377,7 +378,7 @@ async def _run(
 
     async def one(item: PlannedDocument) -> _Outcome:
         # Reprocessing reads the stored model's cached response and never calls a model.
-        answering = CacheOnlyModel(item.model) if item.status == "reprocess" else model
+        answering = CacheOnlyModel(item.model, Extraction) if item.status == "reprocess" else model
         async with limit:
             try:
                 response = await complete(answering, item.prompt, prompt_version, cache, budget)
@@ -397,7 +398,7 @@ async def _store_extraction(
     planned: PlannedDocument,
     model_name: str,
     prompt_version: str,
-    response: Response,
+    response: Response[Extraction],
     items: Sequence[GuidanceItem],
     dropped: Sequence[Dropped],
 ) -> None:
