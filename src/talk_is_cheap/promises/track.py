@@ -3,7 +3,12 @@
 Rules:
 
 - Only `specific` and `partial` promises count; `vague` ones are listed separately and
-  never scored.
+  never scored. Scheduled actions (splits, dividends, record dates on a fixed date) and
+  claims that restate formal guidance (scored with the guidance) are left out, from the
+  counts and the bold-claim figures alike.
+- Open-ended claims not shown delivered 18 months after the statement are
+  `expired_unproven`: reported in a column of their own, never hidden and never counted
+  as resolved.
 - Each promise counts once, however many outlets reported it (its group), with the
   verdict that counts: a review's, else the resolver's.
 - Numeric forecasts already scored against reported results (`statement_outcomes`)
@@ -53,6 +58,10 @@ class TrackRecord:
     bold_kept: int = 0
     vague: int = 0
     promise_ids: list[int] = field(default_factory=list)
+
+    @property
+    def expired(self) -> int:
+        return self.by_verdict.get("expired_unproven", 0)
 
     @property
     def resolved(self) -> int:
@@ -106,6 +115,8 @@ def scored_promises(rows: Iterable[PromiseRow]) -> tuple[list[Scored], Vague]:
     groups: dict[str, list[PromiseRow]] = defaultdict(list)
     vague: Vague = defaultdict(int)
     for row in rows:
+        if row.promise.claim_type == "scheduled_action" or row.promise.guidance_id is not None:
+            continue
         if row.promise.specificity == "vague":
             vague[(row.promise.ticker, row.promise.speaker)] += 1
             continue

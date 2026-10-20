@@ -38,6 +38,8 @@ async def frame_command(
     dry: bool,
     missing_only: bool,
     model: str | None,
+    promise_ids: Sequence[int] | None = None,
+    upgrade: bool = False,
 ) -> int:
     from talk_is_cheap.guidance.llm import (
         CacheOnlyModel,
@@ -84,9 +86,10 @@ async def frame_command(
         sessions = create_session_factory(engine)
         async with sessions() as session:
             fiscal = await calendars(session)
+            only = await _claim_keys(session, promise_ids) if promise_ids else None
             plans = await plan_framing(
                 session, companies, label, cache, fiscal, template=load_prompt(),
-                missing_only=missing_only, limit=limit,
+                missing_only=missing_only, limit=limit, only=only, upgrade=upgrade,
             )  # fmt: skip
         plan = DryRun(plans, pricing)
         print(f"model {label}, prompt {PROMPT_NAME}/{PROMPT_VERSION}")
@@ -136,7 +139,8 @@ async def frame_command(
 
         results = await frame_claims(
             sessions, framer, cache, budget, companies=companies, calendars=fiscal,
-            missing_only=missing_only, limit=limit, on_result=report,
+            missing_only=missing_only, limit=limit, only=only, upgrade=upgrade,
+            on_result=report,
         )  # fmt: skip
     finally:
         await engine.dispose()
@@ -146,6 +150,16 @@ async def frame_command(
     )
     print(budget_line(budget))
     return 0 if all(r.ok for r in results) else 1
+
+
+async def _claim_keys(session: Any, promise_ids: Sequence[int]) -> frozenset[str]:
+    """The claim keys of these promises (any version)."""
+    from sqlalchemy import select
+
+    from talk_is_cheap.db.models import Promise
+
+    keys = await session.scalars(select(Promise.claim_key).where(Promise.id.in_(promise_ids)))
+    return frozenset(keys)
 
 
 async def resolve_command(
@@ -268,11 +282,18 @@ async def resolve_command(
         def report(r: ResolveResult) -> None:
             verdicts = ", ".join(f"{n} {v}" for v, n in sorted(r.verdicts.items())) or "none"
             failed = ", ".join(f"{n} {c}" for c, n in sorted(r.failed_checks.items()))
+            timing = (
+                f"; {r.seconds:.0f}s, {r.seconds / r.resolved:.1f}s a claim "
+                f"({sum(r.claim_seconds) / r.resolved:.1f}s each on its own)"
+                if r.resolved
+                else ""
+            )
             print(
                 f"{r.ticker:<6} {r.resolved} resolved ({r.up_to_date} unchanged, {r.cached} "
                 f"cached, {r.called} called): {verdicts}"
                 + (f"; checks failed: {failed}" if failed else "")
-                + f"; {r.usage.input_tokens:,}/{r.usage.output_tokens:,} tokens, ${r.cost:.4f}",
+                + f"; {r.usage.input_tokens:,}/{r.usage.output_tokens:,} tokens, ${r.cost:.4f}"
+                + timing,
                 file=sys.stdout if r.ok else sys.stderr,
                 flush=True,
             )
@@ -280,7 +301,7 @@ async def resolve_command(
                 print(f"       FAILED {error}", file=sys.stderr, flush=True)
 
         results = await resolve_promises(
-            sessions, deps, plans, notes, on_claim=claim, on_result=report
+            sessions, deps, plans, notes, calendars=fiscal, on_claim=claim, on_result=report
         )
     finally:
         await engine.dispose()
@@ -321,6 +342,8 @@ def _measured(row: "PromiseRow") -> str:
 def _verdict(row: "PromiseRow") -> str:
     if row.promise.specificity == "vague":
         return "vague"
+    if row.promise.guidance_id is not None:
+        return "formal guidance"
     verdict = row.effective or "unresolved"
     return ("REVIEWED " if row.review else "") + verdict.replace("_", " ")
 
@@ -384,6 +407,10 @@ def _print_promise(row: "PromiseRow") -> None:
     print(f"Promise {p.id} ({p.ticker}), version {p.version}{'' if p.current else ' (old)'}")
     print(f"  {p.speaker}, {p.statement_date.isoformat()}, reported by {row.publisher}: {row.url}")
     print(f'  "{short_quote(p.quote, QUOTE_WORDS)}"')
+    if p.claim_type == "scheduled_action":
+        print("  a scheduled action: resolved, but left out of track records")
+    if p.guidance_id is not None:
+        print(f"  restates formal guidance row {p.guidance_id}: scored with the guidance")
     print(f"  subject: {p.subject}; specificity: {p.specificity}; bold: {p.bold}"
           + (f" ({p.bold_basis})" if p.bold_basis else ""))  # fmt: skip
     due = p.due_date.isoformat() if p.due_date else "none"
@@ -409,11 +436,20 @@ def _print_promise(row: "PromiseRow") -> None:
         if v.measured_value is not None:
             print(f"  measured: {_measured(row)} against {_target(row)}")
         if v.proof_date:
-            print(f"  first proof: {v.proof_date}; on time until {v.grace_end or 'not yet known'}"
+            source = "stated in the evidence" if v.proof_date_source == "event" else "published"
+            print(f"  delivered: {v.proof_date} ({source}); grace period until "
+                  f"{v.grace_end or 'not yet known'}"
                   + (f"; {v.days_late} days late" if v.days_late is not None else ""))  # fmt: skip
+        if v.revised_before_due:
+            print("  revised before its due date (a later statement delayed or lowered it)")
         print(f"  reasoning: {v.reasoning}")
         if v.resolved_with:
             print(f"  resolved together with promise {v.resolved_with} (the same promise)")
+        relevant = [f for f in v.assessments if f.get("finding") != "irrelevant"]
+        print(f"\n  judge's findings ({len(v.assessments) - len(relevant)} items irrelevant):")
+        for f in relevant:
+            note = f": {f['note']}" if f.get("note") else ""
+            print(f"    {f['evidence_id']:<5}{f['finding']}{note}"[:200])
         print("\n  checks:")
         for c in v.checks:
             mark = {True: "pass", False: "FAIL", None: "note"}[c["passed"]]  # type: ignore[index]
@@ -478,11 +514,14 @@ async def track_command(by: str, ticker: str | None, specific_only: bool) -> int
     print(
         f"Track records by {by}: specific{'' if specific_only else ' and partial'} claims, "
         "each counted once; numeric forecasts already scored count too. Rates are of "
-        f"resolved claims; fewer than 5 resolved is {TOO_FEW!r}. Vague claims are never scored.\n"
+        f"resolved claims; fewer than 5 resolved is {TOO_FEW!r}. EXPIRED: open-ended claims "
+        "not shown delivered 18 months on (not resolved, never hidden). Vague claims, "
+        "scheduled actions and claims restating formal guidance are never scored.\n"
     )
     print(
         f"{'GROUP':<30}{'CLAIMS':>7}{'RESOLVED':>9}  {'DEL/LATE/PART/NOT/WALK':<24}"
-        f"{'ON TIME':>8}{'DAYS LATE':>10}{'WALKED':>7}{'BOLD':>6}{'BOLD HIT':>9}{'VAGUE':>6}"
+        f"{'ON TIME':>8}{'DAYS LATE':>10}{'WALKED':>7}{'BOLD':>6}{'BOLD HIT':>9}{'EXPIRED':>8}"
+        f"{'VAGUE':>6}"
     )
     for r in records:
         _print_record(r)
@@ -508,7 +547,10 @@ def _print_record(r: "TrackRecord") -> None:
         )
     else:
         rates = f"  {TOO_FEW:<38}"
-    print(f"{r.key[:29]:<30}{r.claims:>7}{r.resolved:>9}  {counts:<24}{rates}{r.vague:>6}")
+    print(
+        f"{r.key[:29]:<30}{r.claims:>7}{r.resolved:>9}  {counts:<24}{rates}{r.expired:>8}"
+        f"{r.vague:>6}"
+    )
 
 
 async def eval_command(labels_dir: Path, dry: bool, details: bool) -> int:

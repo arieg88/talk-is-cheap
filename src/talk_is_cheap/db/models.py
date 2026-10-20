@@ -860,6 +860,7 @@ PROMISE_VERDICTS = (
     "not_delivered",
     "walked_back",
     "too_early",
+    "expired_unproven",
     "cannot_determine",
 )
 _PROMISE_VERDICT_LIST = ", ".join(f"'{v}'" for v in PROMISE_VERDICTS)
@@ -895,6 +896,11 @@ class Promise(Base):
             name="baseline_source",
         ),
         CheckConstraint("specificity IN ('specific', 'partial', 'vague')", name="specificity"),
+        CheckConstraint(
+            "comparison_basis IS NULL OR comparison_basis IN ('yoy', 'sequential', 'absolute')",
+            name="comparison_basis",
+        ),
+        CheckConstraint("claim_type IN ('promise', 'scheduled_action')", name="claim_type"),
         Index("ix_promises_ticker_current", "ticker", "current"),
         Index("ix_promises_group_key", "group_key"),
     )
@@ -934,6 +940,15 @@ class Promise(Base):
     specificity: Mapped[str] = mapped_column(String(8))
     bold: Mapped[bool] = mapped_column(Boolean)
     bold_basis: Mapped[str | None] = mapped_column(Text)
+    # Other companies the claim names (partners, customers, makers): searched too.
+    related_companies: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
+    comparison_basis: Mapped[str | None] = mapped_column(String(16))  # yoy, sequential, absolute
+    # `scheduled_action`: a split, dividend or record date on a fixed date; resolved, but
+    # left out of track records and bold-claim figures.
+    claim_type: Mapped[str] = mapped_column(String(16), server_default="promise")
+    # The formal guidance row the claim restates (same metric, period and figure): the
+    # claim is scored there, not again here.
+    guidance_id: Mapped[int | None] = mapped_column(ForeignKey("guidance.id", ondelete="SET NULL"))
     # Claims that make the same promise (one statement reported by several outlets).
     group_key: Mapped[str] = mapped_column(String(64))
     framing: Mapped[dict[str, object]] = mapped_column(JSONB)  # the model's answer
@@ -946,9 +961,10 @@ class Promise(Base):
 
 
 class PromiseVerdict(Base):
-    """The resolver's verdict on one framed promise (`promises/resolve.py`): what the
-    judge model said, what the code checks made of it, the evidence it cites (all dated
-    after the statement), and the rule version it judged. Replaced when the promise is
+    """The resolver's verdict on one framed promise (`promises/resolve.py`): the judge
+    model's finding on each item, the verdict code derives from them and its checks,
+    the evidence it cites (all dated after the statement), and the rule version it
+    judged. Replaced when the promise is
     resolved again with new evidence."""
 
     __tablename__ = "promise_verdicts"
@@ -961,7 +977,11 @@ class PromiseVerdict(Base):
         ForeignKey("promises.id", ondelete="CASCADE"), primary_key=True
     )
     verdict: Mapped[str] = mapped_column(String(20))  # after the checks
+    # What the judge's findings give, before the checks (`checks.py: derive`).
     model_verdict: Mapped[str] = mapped_column(String(20))
+    # The judge's finding on each gathered item: satisfies, partly, contradicts,
+    # walks_back or irrelevant, with a note.
+    assessments: Mapped[list[dict[str, object]]] = mapped_column(JSONB, server_default="[]")
     failed_checks: Mapped[list[str]] = mapped_column(JSONB)
     checks: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
     measured_value: Mapped[Decimal | None] = mapped_column(AMOUNT)
@@ -971,7 +991,12 @@ class PromiseVerdict(Base):
     gathered: Mapped[list[dict[str, object]]] = mapped_column(JSONB)  # every item gathered
     reasoning: Mapped[str] = mapped_column(Text)
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
-    proof_date: Mapped[date | None] = mapped_column(Date)  # the first evidence of delivery
+    # When delivery happened: the earliest event date the satisfying evidence states (read
+    # and checked in code), else its publication date.
+    proof_date: Mapped[date | None] = mapped_column(Date)
+    proof_date_source: Mapped[str | None] = mapped_column(String(16))  # event, published
+    # The company revised the claim (delayed or lowered it) before its due date.
+    revised_before_due: Mapped[bool] = mapped_column(Boolean, server_default="false")
     grace_end: Mapped[date | None] = mapped_column(Date)
     days_late: Mapped[int | None] = mapped_column(Integer)
     rule_version: Mapped[str] = mapped_column(String(32))

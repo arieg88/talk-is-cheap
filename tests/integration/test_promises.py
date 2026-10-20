@@ -35,6 +35,7 @@ from talk_is_cheap.promises.queries import promise_rows
 from talk_is_cheap.promises.resolve import ResolveDeps, plan_resolution, resolve_promises
 from talk_is_cheap.promises.review import review
 from talk_is_cheap.promises.schema import (
+    Assessment,
     DeadlineAnswer,
     EvidencePlan,
     FramingAnswer,
@@ -110,10 +111,8 @@ def plan(prompt: str) -> EvidencePlan:
 
 def judge(prompt: str) -> Judgment:
     return Judgment(
-        verdict="delivered",
+        assessments=[Assessment(evidence_id="E1", finding="satisfies")],
         measured=[MeasuredSource(evidence_id="E1")],
-        evidence_ids=["E1"],
-        first_proof_id="E1",
         reasoning="Second-quarter revenue was $13 billion, above the $12 billion promised.",
         confidence=0.9,
     )
@@ -293,6 +292,10 @@ async def test_claims_are_framed_resolved_reviewed_and_scored(
     assert verdict.proof_date == date(2026, 8, 1) and verdict.days_late is None
     assert verdict.rule_version == promise.version and not verdict.failed_checks
     assert verdict.measured is not None and verdict.measured["tool"] == "compute"
+    assert verdict.assessments == [
+        {"evidence_id": "E1", "finding": "satisfies", "note": "", "event_date_text": ""}
+    ]
+    assert verdict.model_verdict == "delivered"
     assert "Only evidence dated after the statement is gathered" in planner.prompts[0]
 
     rerun = await resolve_promises(sessions, deps, plans, {TICKER: "December years"})

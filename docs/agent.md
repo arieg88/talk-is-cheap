@@ -450,10 +450,13 @@ The run stopped at its $0.07 cap after the 8 earlier questions
 fails as before. `news-nvda-q2fy25-revenue` regressed: its draft wrote "May 22–23, 2024",
 the number check read "–23" as a figure, and after two revisions the news sentences were
 left out, so the answer cites only the release. The number check now strips day ranges
-("May 22–23", tested), at no cost. **The 6 promise questions were not run with the
-model**: the promise tracker's spending had reached its share of the budget. With the
-scripted model (`eval agent --dry-run`) all 6 pass, which checks the tools, the routing,
-the harness and the scoring, not the model's answers.
+("May 22–23", tested), at no cost. **The 6 promise questions**, run on 2026-10-21 with judge v3 verdicts
+(`20261020T205842Z.json`, $0.0448): 4 of 6 pass all four scores (Blackwell, the
+Roadster's "too early to judge", the vague "poised for growth" claim left unscored, and
+the track records' "too few to judge"). Nvidia's dividend answer is right ("paid on June
+28, 2024", citing the 10-Q) but uses no word the check accepts for delivered; AMD's
+answer gives the statement tool's outcome ("not comparable") instead of the promise
+verdict, `cannot_determine`.
 
 ## 6. Known limitations
 

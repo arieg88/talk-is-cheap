@@ -25,13 +25,16 @@ from talk_is_cheap.db.models import (
     Article,
     ArticleText,
     Company,
+    Document,
+    Guidance,
     Promise,
     Statement,
     StatementOutcome,
 )
-from talk_is_cheap.edgar.fiscal import FiscalCalendar
+from talk_is_cheap.edgar.fiscal import FiscalCalendar, FiscalQuarter
 from talk_is_cheap.guidance.llm import (
     Budget,
+    CacheOnlyModel,
     CostCapReached,
     ExtractionModel,
     LlmError,
@@ -48,6 +51,7 @@ from talk_is_cheap.promises.framing import (
     PROCESSING_VERSION,
     ClaimInput,
     Framed,
+    GuidedFigure,
     claim_key,
     frame,
 )
@@ -55,7 +59,7 @@ from talk_is_cheap.promises.schema import FramingAnswer
 from talk_is_cheap.universe import UniverseCompany
 
 PROMPT_NAME = "promise_framing"
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v3"
 CONCURRENCY = 4
 # Output limit of one call, in tokens: also what a call reserves against the budget.
 MAX_OUTPUT_TOKENS = 1_600
@@ -151,6 +155,7 @@ class PlannedClaim:
     prompt: str
     # "up_to_date", "cached" or "call".
     status: str
+    prompt_version: str = PROMPT_VERSION
 
 
 @dataclass(slots=True)
@@ -197,6 +202,7 @@ async def claims_to_frame(
         ).all()
         if t.text
     }
+    filed = await reported_through(session, company.ticker)
     shared: dict[tuple[int, str], int] = {}
     for row, *_ in rows:
         shared[(row.article_id, row.quote)] = shared.get((row.article_id, row.quote), 0) + 1
@@ -221,6 +227,9 @@ async def claims_to_frame(
                     paragraph=paragraph_of(text, start, end),
                     publisher=publisher,
                     focus=row.claim if shared[(row.article_id, row.quote)] > 1 else None,
+                    reported_through=max(
+                        (q for day, q in filed if day < row.statement_date), default=None
+                    ),
                 ),
                 row.executive_role or row.speaker_role,
             )
@@ -239,11 +248,17 @@ async def plan_framing(
     prompt_version: str = PROMPT_VERSION,
     missing_only: bool = False,
     limit: int | None = None,
+    only: frozenset[str] | None = None,
+    upgrade: bool = False,
 ) -> list[FramePlan]:
     """What a run would do with each claim. `limit` keeps, per company, the first
     `limit` claims that need work; `missing_only` frames only claims with no promise of
-    any version."""
-    version = version_label(prompt_version)
+    any version; `only` frames only the claims with these claim keys, with the current
+    prompt (the others keep the promise they have); `upgrade` frames every claim with the
+    current prompt. Otherwise a claim keeps the prompt version it was framed with, and a
+    new post-processing version re-processes its cached answer at no cost; new claims
+    get the current prompt."""
+    templates = {prompt_version: template}
     plans = []
     for company in companies:
         stored = (
@@ -255,16 +270,26 @@ async def plan_framing(
         ).all()
         framed = {(k, v) for k, v, _ in stored}
         any_version = {k for k, _, _ in stored}
+        # The prompt version each claim's current promise was framed with.
+        prompted = {k: v.split("+", 1)[0] for k, v, is_current in stored if is_current}
         claims = await claims_to_frame(session, company)
         planned: list[PlannedClaim] = []
         to_do = 0
         for claim, role in claims:
-            prompt = render_prompt(template, claim, role, calendars.get(company.ticker))
-            if (claim.claim_key, version) in framed or (
+            if only is not None and claim.claim_key not in only:
+                continue
+            # A claim keeps the prompt it was framed with (a new post-processing version
+            # re-processes its cached answer), unless it is picked or upgraded.
+            keep = claim.claim_key in prompted and only is None and not upgrade
+            version = prompted[claim.claim_key] if keep else prompt_version
+            if version not in templates:
+                templates[version] = load_prompt(version)
+            prompt = render_prompt(templates[version], claim, role, calendars.get(company.ticker))
+            if (claim.claim_key, version_label(version)) in framed or (
                 missing_only and claim.claim_key in any_version
             ):
                 status = "up_to_date"
-            elif cache.get(model_name, prompt_version, prompt, FramingAnswer) is not None:
+            elif cache.get(model_name, version, prompt, FramingAnswer) is not None:
                 status = "cached"
             else:
                 status = "call"
@@ -272,11 +297,11 @@ async def plan_framing(
                 if limit is not None and to_do >= limit:
                     continue
                 to_do += 1
-            planned.append(PlannedClaim(claim, prompt, status))
+            planned.append(PlannedClaim(claim, prompt, status, version))
         current_keys = {c.claim_key for c, _ in claims}
         stale = (
             []
-            if limit is not None
+            if limit is not None or only is not None
             else sorted({k for k, _, is_current in stored if is_current} - current_keys)
         )
         plans.append(FramePlan(company.ticker, len(claims), planned, stale))
@@ -311,12 +336,13 @@ async def frame_claims(
     prompt_version: str = PROMPT_VERSION,
     missing_only: bool = False,
     limit: int | None = None,
+    only: frozenset[str] | None = None,
+    upgrade: bool = False,
     on_result: Callable[[FrameResult], None] | None = None,
 ) -> list[FrameResult]:
     """Frame every company's claims that need it and store the promises. Stops at the
     cost cap, keeping what was framed before it."""
     template = load_prompt(prompt_version)
-    version = version_label(prompt_version)
     async with sessions() as session:
         plans = await plan_framing(
             session,
@@ -328,6 +354,8 @@ async def frame_claims(
             prompt_version=prompt_version,
             missing_only=missing_only,
             limit=limit,
+            only=only,
+            upgrade=upgrade,
         )
     results = []
     stop = False
@@ -338,8 +366,16 @@ async def frame_claims(
             result.errors.append("not run: the cost cap or budget was reached")
         async with sessions() as session:
             actuals = await _actuals(session, plan.ticker)
+            guidance = await guided_figures(session, plan.ticker)
         outcomes = await _run(
-            to_run, model, cache, budget, prompt_version, calendars.get(plan.ticker), actuals
+            to_run,
+            model,
+            cache,
+            budget,
+            prompt_version,
+            calendars.get(plan.ticker),
+            actuals,
+            guidance,
         )
         async with sessions() as session, session.begin():
             for planned, outcome in zip(to_run, outcomes, strict=True):
@@ -354,7 +390,14 @@ async def frame_claims(
                     result.called += 1
                     result.cost += response.cost
                     result.usage += response.usage
-                await store_promise(session, planned.claim, framed, response, model.name, version)
+                await store_promise(
+                    session,
+                    planned.claim,
+                    framed,
+                    response,
+                    model.name,
+                    version_label(planned.prompt_version),
+                )
             await _relink(session, [p.claim for p in plan.planned])
             if plan.stale:
                 await session.execute(
@@ -375,6 +418,40 @@ async def frame_claims(
     return results
 
 
+async def guided_figures(session: AsyncSession, ticker: str) -> list[GuidedFigure]:
+    """The company's formal guidance figures that count in verdicts."""
+    from talk_is_cheap.guidance.matching import counts_in_verdicts
+
+    rows = (
+        await session.scalars(
+            select(Guidance)
+            .join(Company, Company.cik == Guidance.cik)
+            .where(Company.ticker == ticker)
+        )
+    ).all()
+    return [
+        GuidedFigure(
+            g.id,
+            g.metric,
+            (g.target_fiscal_year, g.target_fiscal_quarter),
+            g.issued_at,
+            tuple(v for v in (g.low, g.high, g.point) if v is not None),
+        )
+        for g in rows
+        if g.target_fiscal_year is not None and g.measure == "level" and counts_in_verdicts(g)
+    ]
+
+
+async def reported_through(session: AsyncSession, ticker: str) -> list[tuple[date, FiscalQuarter]]:
+    """When each fiscal quarter's results were first filed (release, 10-Q or 10-K)."""
+    rows = await session.execute(
+        select(Document.filed_at, Document.fiscal_year, Document.fiscal_quarter)
+        .join(Company, Company.cik == Document.cik)
+        .where(Company.ticker == ticker, Document.doc_type.in_(("press_release", "10q", "10k")))
+    )
+    return sorted((filed, FiscalQuarter(y, q)) for filed, y, q in rows)
+
+
 async def _actuals(session: AsyncSession, ticker: str) -> Actuals | None:
     cik = await session.scalar(select(Company.cik).where(Company.ticker == ticker))
     return None if cik is None else await load_actuals(session, cik)
@@ -391,20 +468,30 @@ async def _run(
     prompt_version: str,
     fiscal: FiscalCalendar | None,
     actuals: Actuals | None,
+    guidance: Sequence[GuidedFigure] = (),
 ) -> list[_Outcome]:
     limit = asyncio.Semaphore(CONCURRENCY)
 
     async def one(item: PlannedClaim) -> _Outcome:
         async with limit:
             try:
+                answering: ExtractionModel[FramingAnswer] = (
+                    CacheOnlyModel(model.name, FramingAnswer) if item.status == "cached" else model
+                )
                 response = await complete(
-                    model, item.prompt, prompt_version, cache, budget, estimate_usage(item.prompt)
+                    answering,
+                    item.prompt,
+                    item.prompt_version,
+                    cache,
+                    budget,
+                    estimate_usage(item.prompt),
                 )
             except (LlmError, CostCapReached) as exc:
                 return exc
             except Exception as exc:  # a provider error must not lose the other claims
                 return LlmError(f"{type(exc).__name__}: {exc}")
-        return response, frame(item.claim, response.extraction.framing(), fiscal, actuals)
+        framed = frame(item.claim, response.extraction.framing(), fiscal, actuals, guidance)
+        return response, framed
 
     return list(await asyncio.gather(*(one(p) for p in planned)))
 
@@ -453,6 +540,10 @@ async def store_promise(
         specificity=framed.specificity,
         bold=framed.bold,
         bold_basis=framed.bold_basis,
+        claim_type=framed.claim_type,
+        guidance_id=framed.guidance_id,
+        related_companies=framed.related_companies,
+        comparison_basis=framed.comparison_basis,
         group_key=framed.group_key,
         framing=response.extraction.model_dump(mode="json"),
         notes=framed.notes,

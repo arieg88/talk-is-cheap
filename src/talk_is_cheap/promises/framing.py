@@ -8,6 +8,9 @@ claim always gives the same promise and the same rule.
   and "break even" are 0). Otherwise it is dropped, with a note.
 - **Specificity**: `specific` with a checkable target and a deadline, `partial` with only
   one of them, `vague` with neither. Only the first two are ever scored.
+- **Baselines** of a change follow its comparison basis: the same period a year earlier
+  for `yoy`, the latest period reported before the statement for `sequential` (and for
+  framings without a basis whose quote does not say "year over year").
 - **Bold**, in code wherever numbers allow: a multiple of 1.5 or more, a change of more
   than 50%, an absolute target more than 50% above (or below half of) a stored baseline,
   or turning a loss into a profit. Without numbers to compare, a claim about a new
@@ -19,12 +22,13 @@ claim always gives the same promise and the same rule.
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
 from talk_is_cheap.agent.checks import mentions
-from talk_is_cheap.edgar.fiscal import DRIFT, FiscalCalendar
+from talk_is_cheap.edgar.fiscal import DRIFT, FiscalCalendar, FiscalQuarter
 from talk_is_cheap.guidance.matching import Actuals
 from talk_is_cheap.promises.baselines import (
     Baseline,
@@ -37,7 +41,7 @@ from talk_is_cheap.promises.schema import Framing
 
 # Raise when post-processing changes: claims are then framed again from the cached
 # responses, as a new version, without calling the model.
-PROCESSING_VERSION = "4"
+PROCESSING_VERSION = "5"
 
 NUMERIC_KINDS = ("multiple", "absolute", "change", "threshold")
 # Targets bold enough to say so: a multiple of the baseline, a change in percent, or an
@@ -84,6 +88,19 @@ class ClaimInput:
     # The claim in brief, when its quote holds other claims too: the prompt then says
     # which one to frame.
     focus: str | None = None
+    # The latest fiscal quarter whose results were filed before the statement date.
+    reported_through: FiscalQuarter | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GuidedFigure:
+    """A formal guidance row's figure, for linking a claim that restates it."""
+
+    id: int
+    metric: str
+    period: tuple[int, int | None]  # (fiscal year, fiscal quarter or None)
+    issued_at: date
+    values: tuple[Decimal, ...]  # low, high, point as given
 
 
 @dataclass(slots=True)
@@ -110,6 +127,10 @@ class Framed:
     bold: bool
     bold_basis: str | None
     group_key: str
+    related_companies: list[str] = field(default_factory=list)
+    comparison_basis: str | None = None
+    claim_type: str = "promise"
+    guidance_id: int | None = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -123,6 +144,7 @@ def frame(
     framing: Framing,
     fiscal: FiscalCalendar | None,
     actuals: Actuals | None,
+    guidance: Sequence[GuidedFigure] = (),
 ) -> Framed:
     notes: list[str] = []
     text = f"{claim.quote}\n{claim.paragraph}"
@@ -142,20 +164,23 @@ def frame(
     event = " ".join(framing.event.split()) if framing.event and kind == "event" else None
 
     metric = framing.metric if framing.metric not in (None, "other", "tax_rate") else None
-    due = due_date(framing.deadline, claim.statement_date, fiscal)
+    due = due_date(framing.deadline, claim.statement_date, fiscal, claim.reported_through)
     if due.note:
         notes.append(f"deadline {framing.deadline.phrase or framing.deadline.type!r}: {due.note}")
     baseline, baseline_source = _baseline(
         claim, framing, kind, value, metric, counted, text, actuals, notes
     )
+    basis = framing.comparison_basis
+    if basis is None and kind == "change" and _YEAR_OVER_YEAR.search(claim.quote):
+        basis = "yoy"  # framings without the field: read from the quote's wording
     if (
         kind == "change"
+        and basis == "yoy"
         and metric is not None
         and actuals is not None
         and fiscal is not None
         and due.date is not None
         and baseline_source != "article"
-        and _YEAR_OVER_YEAR.search(claim.quote)
     ):
         target = covering_period(fiscal, due.date, framing.measure_period)
         earlier = year_earlier_baseline(actuals, metric, target, claim.ticker)
@@ -202,7 +227,22 @@ def frame(
             due.date.isoformat() if due.date else "",
         ]
     )
+    claim_type = (
+        "scheduled_action"
+        if due.date is not None
+        and _SCHEDULED.search(f"{subject} {event or ''} {claim.quote}")
+        and kind in ("event", "absolute", "threshold", None)
+        else "promise"
+    )
+    guidance_id = None
+    if metric is not None and value is not None and due.date is not None and fiscal is not None:
+        period = covering_period(fiscal, due.date, framing.measure_period)
+        guidance_id = _guidance_row(guidance, metric, period, value, claim.statement_date)
+        if guidance_id is not None:
+            notes.append(f"restates formal guidance row {guidance_id}: scored there")
     return Framed(
+        claim_type=claim_type,
+        guidance_id=guidance_id,
         subject=subject,
         metric=metric,
         measure_period=framing.measure_period,
@@ -223,8 +263,42 @@ def frame(
         bold=bold,
         bold_basis=bold_basis,
         group_key=hashlib.sha256(group.encode()).hexdigest(),
+        related_companies=list(dict.fromkeys(framing.related_companies)),
+        comparison_basis=basis,
         notes=notes,
     )
+
+
+# Corporate actions on a fixed date: resolved, but not counted as promises in track records.
+_SCHEDULED = re.compile(
+    r"\b(stock split|split-adjusted|forward split|dividend|record date|shareholders of record|"
+    r"holders of record|ex-dividend)\b",
+    re.IGNORECASE,
+)
+# Guidance a claim restates: issued this many days before or after the statement.
+GUIDANCE_WINDOW_DAYS = 120
+
+
+def _guidance_row(
+    guidance: Sequence[GuidedFigure],
+    metric: str,
+    period: tuple[int, int | None],
+    value: Decimal,
+    said: date,
+) -> int | None:
+    """The formal guidance row with the claim's metric, period and figure (a low, high or
+    point within 0.5%), issued closest to the statement."""
+    found = [
+        g
+        for g in guidance
+        if g.metric == metric
+        and g.period == period
+        and abs((g.issued_at - said).days) <= GUIDANCE_WINDOW_DAYS
+        and any(v != 0 and abs(v - value) <= abs(v) * Decimal("0.005") for v in g.values)
+    ]
+    if not found:
+        return None
+    return min(found, key=lambda g: (abs((g.issued_at - said).days), g.id)).id
 
 
 def covering_period(

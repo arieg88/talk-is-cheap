@@ -113,6 +113,9 @@ class ToolContext:
     evidence: EvidenceLog = field(default_factory=EvidenceLog)
     calls: list[ToolCall] = field(default_factory=list)
     sql_timeout_seconds: float = sql.STATEMENT_TIMEOUT_SECONDS
+    # Hybrid results the cross-encoder re-orders in `search_filings` and `search_news`;
+    # None for the retrieval default.
+    rerank_depth: int | None = None
     _models: dict[str, Any] = field(default_factory=dict)
 
     def loaded_embedder(self) -> "Embedder":
@@ -224,6 +227,7 @@ PromiseVerdict = Literal[
     "not_delivered",
     "walked_back",
     "too_early",
+    "expired_unproven",
     "cannot_determine",
 ]
 
@@ -351,6 +355,15 @@ async def get_actuals(ctx: ToolContext, args: GetActualsInput) -> ToolOutput:
                 else:
                     rows.append((found.label, found.period_end, metric, value))
         urls = await _filing_urls(session, company.cik, [v.accession_no for *_, v in rows])
+        accepted = dict(
+            (
+                await session.execute(
+                    select(Filing.accession_no, Filing.acceptance_datetime).where(
+                        Filing.accession_no.in_({v.accession_no for *_, v in rows})
+                    )
+                )
+            ).all()
+        )
     items = [
         ctx.evidence.add(
             "sec_filing",
@@ -367,6 +380,11 @@ async def get_actuals(ctx: ToolContext, args: GetActualsInput) -> ToolOutput:
                 "vintage": vintage,
                 "form": value.form,
                 "filed": value.filed.isoformat(),
+                **(
+                    {"accepted": at.isoformat()}
+                    if (at := accepted.get(value.accession_no)) is not None
+                    else {}
+                ),
                 "accession_no": value.accession_no,
                 **({"derived": value.derivation or True} if value.derived else {}),
             },
@@ -510,6 +528,8 @@ async def search_filings(ctx: ToolContext, args: SearchFilingsInput) -> ToolOutp
                 "ticker": ", ".join(r.tickers),
                 "period": r.period.label if r.period else None,
                 "filed": r.published_at.date().isoformat(),
+                **({"period_end": r.period_end.isoformat()} if r.period_end else {}),
+                **({"accepted": r.accepted_at.isoformat()} if r.accepted_at else {}),
                 "doc_type": r.doc_type,
                 "section": r.section_type,
                 "section_title": r.section_title,
@@ -686,6 +706,7 @@ async def get_track_record(ctx: ToolContext, args: GetTrackRecordInput) -> ToolO
             "resolved": record.resolved,
             "by_verdict": record.by_verdict,
             "vague_not_scored": record.vague,
+            "expired_unproven": record.expired,
             "inputs": [i["id"] for i in inputs],
         }
         if record.enough:
@@ -723,6 +744,13 @@ def _promise_item(ctx: ToolContext, row: Any, outcome_ids: Sequence[str]) -> Evi
         "bold": promise.bold,
         "provenance_note": f"reported by {row.publisher or 'a news outlet'}",
     }
+    if promise.guidance_id is not None:
+        data["verdict_note"] = (
+            "restates formal guidance: scored with the guidance (get_guidance), not here"
+        )
+        return ctx.evidence.add("news_report", row.url, "get_promises", data)
+    if promise.claim_type == "scheduled_action":
+        data["claim_type"] = "scheduled action: resolved, but not counted in track records"
     if promise.specificity == "vague":
         data["scored"] = False
         data["verdict_note"] = "vague: no checkable target or deadline, never scored"
@@ -732,6 +760,8 @@ def _promise_item(ctx: ToolContext, row: Any, outcome_ids: Sequence[str]) -> Evi
         data["verdict_note"] = "not resolved yet"
     elif row.effective == "too_early":
         data["verdict_note"] = "too early to judge"
+    elif row.effective == "expired_unproven":
+        data["verdict_note"] = "open-ended and not shown delivered 18 months after the statement"
     if row.review is not None:
         data["review"] = f"reviewed as {row.review.verdict}" + (
             f": {row.review.note}" if row.review.note else ""
@@ -748,6 +778,8 @@ def _promise_item(ctx: ToolContext, row: Any, outcome_ids: Sequence[str]) -> Evi
         data["reasoning"] = verdict.reasoning
         if verdict.days_late is not None:
             data["days_late"] = verdict.days_late
+        if verdict.revised_before_due:
+            data["revised_before_due"] = True
         if verdict.failed_checks:
             data["failed_checks"] = verdict.failed_checks
     if outcome_ids:
@@ -1243,6 +1275,8 @@ async def _search(ctx: ToolContext, query: str, **filters: Any) -> list["SearchR
 
     async with ctx.sessions() as session:
         searcher = Searcher(session, ctx.loaded_embedder, ctx.loaded_reranker)
+        if ctx.rerank_depth is not None:
+            filters["rerank_depth"] = ctx.rerank_depth
         try:
             return await searcher.search(query, **filters)
         except ValueError as exc:  # a malformed period

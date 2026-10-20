@@ -18,6 +18,7 @@ types. Every result carries its citation: the document's sec.gov URL and charact
 range, or the article's link.
 """
 
+import asyncio
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -39,7 +40,15 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from talk_is_cheap.db.models import Article, ArticleCompany, Chunk, Document, Embedding, Section
+from talk_is_cheap.db.models import (
+    Article,
+    ArticleCompany,
+    Chunk,
+    Document,
+    Embedding,
+    Filing,
+    Section,
+)
 from talk_is_cheap.edgar.fiscal import FiscalQuarter
 from talk_is_cheap.retrieval.chunking import embedded_text
 from talk_is_cheap.retrieval.encoders import Embedder, Reranker
@@ -122,6 +131,8 @@ class SearchResult:
     url: str
     char_start: int
     char_end: int
+    period_end: date | None = None  # filings: the end of the period the document reports
+    accepted_at: datetime | None = None  # filings: when the SEC accepted the filing
 
     @property
     def citation(self) -> str:
@@ -249,11 +260,13 @@ class Searcher:
         mode: Mode | str = Mode.RERANK,
         *,
         context_header: bool = True,
+        rerank_depth: int = RERANK_DEPTH,
     ) -> list[SearchResult]:
         """The `k` best passages for `query`. `until` is inclusive for a date and
         exclusive for a datetime. `context_header=False` searches the vectors of chunk
         text without its header (they exist once `talk-is-cheap eval retrieval` made
-        them) and reranks text alone."""
+        them) and reranks text alone. `rerank_depth` is how many hybrid results the
+        cross-encoder re-orders."""
         mode = Mode(mode)
         if isinstance(periods, str):
             periods = parse_periods(periods)
@@ -281,7 +294,7 @@ class Searcher:
             vector = await self._vector(query, filters, depth, context_header)
             ranked = rrf([[i for i, _ in keyword], [i for i, _ in vector]])
             if mode is Mode.RERANK:
-                ranked = await self._rerank(query, ranked[:RERANK_DEPTH], context_header)
+                ranked = await self._rerank(query, ranked[:rerank_depth], context_header)
         return await self._results(ranked[:k])
 
     async def _keyword(self, query: str, filters: Filters, limit: int) -> list[tuple[int, float]]:
@@ -307,7 +320,10 @@ class Searcher:
     ) -> list[tuple[int, float]]:
         embedder = self.embedder
         dimensions = int(embedder.dimensions)
-        vector = ",".join(repr(float(x)) for x in embedder.embed_query(query))
+        # In a worker thread: the model runs on the CPU (ONNX Runtime releases the GIL), so
+        # concurrent searches overlap instead of blocking the event loop.
+        query_vector = await asyncio.to_thread(embedder.embed_query, query)
+        vector = ",".join(repr(float(x)) for x in query_vector)
         # The same expression and model predicate as the model's partial HNSW index
         # (index.py: ensure_vector_index), so the planner can use it.
         distance: ColumnElement[float] = literal_column(
@@ -345,7 +361,7 @@ class Searcher:
         passages = {
             i: embedded_text(header, body) if context_header else body for i, header, body in rows
         }
-        scores = self.reranker.score(query, [passages[i] for i in ids])
+        scores = await asyncio.to_thread(self.reranker.score, query, [passages[i] for i in ids])
         return sorted(zip(ids, scores, strict=True), key=lambda pair: -pair[1])
 
     async def _results(self, ranked: Sequence[tuple[int, float]]) -> list[SearchResult]:
@@ -358,8 +374,11 @@ class Searcher:
                 Section.title,
                 Article.url,
                 Article.publisher,
+                Document.period_end,
+                Filing.acceptance_datetime,
             )
             .outerjoin(Document, Document.id == Chunk.document_id)
+            .outerjoin(Filing, Filing.accession_no == Document.accession_no)
             .outerjoin(Section, Section.id == Chunk.section_id)
             .outerjoin(Article, Article.id == Chunk.article_id)
             .where(Chunk.id.in_([i for i, _ in ranked]))
@@ -367,7 +386,9 @@ class Searcher:
         found = {row[0].id: row for row in rows}
         results = []
         for chunk_id, score in ranked:
-            chunk, document_url, section_title, article_url, publisher = found[chunk_id]
+            chunk, document_url, section_title, article_url, publisher, period_end, accepted = (
+                found[chunk_id]
+            )
             period = None
             if chunk.fiscal_year is not None and chunk.fiscal_quarter is not None:
                 period = FiscalQuarter(chunk.fiscal_year, chunk.fiscal_quarter)
@@ -388,6 +409,8 @@ class Searcher:
                     url=document_url or article_url or "",
                     char_start=chunk.char_start,
                     char_end=chunk.char_end,
+                    period_end=period_end,
+                    accepted_at=accepted,
                 )
             )
         return results

@@ -29,12 +29,15 @@ call; a verdict also records an evidence key (the rule version, the evidence and
 prompt versions), so such a run changes nothing.
 """
 
+import asyncio
 import hashlib
 import json
+import re
+import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, TypedDict
 
@@ -44,7 +47,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from talk_is_cheap.agent.evidence import Evidence, EvidenceLog, compact, evidence_date
 from talk_is_cheap.agent.tools import ToolContext, call_tool
-from talk_is_cheap.db.models import Company, Document, Promise, PromiseVerdict
+from talk_is_cheap.db.models import (
+    Article,
+    Company,
+    Document,
+    Promise,
+    PromiseVerdict,
+    StockSplit,
+)
 from talk_is_cheap.edgar.fiscal import FiscalCalendar, FiscalQuarter
 from talk_is_cheap.guidance.llm import (
     Budget,
@@ -57,12 +67,19 @@ from talk_is_cheap.guidance.llm import (
     load_prompt_file,
 )
 from talk_is_cheap.promises.checks import Checked, Measured, PromiseFacts, check, item_date
-from talk_is_cheap.promises.framing import covering_period
+from talk_is_cheap.promises.framing import NUMERIC_KINDS, covering_period
 from talk_is_cheap.promises.schema import EvidencePlan, Judgment
+from talk_is_cheap.universe import Universe
 
 PLAN_PROMPT = ("promise_plan", "v1")
-JUDGE_PROMPT = ("promise_judge", "v1")
+JUDGE_PROMPT = ("promise_judge", "v3")
 MAX_TOOL_CALLS = 6
+# Claims resolved at once: the model calls and the searches of one claim overlap with
+# another's (the search models run in worker threads).
+CONCURRENCY = 4
+# Related companies whose documents are searched too, at most, and the results of each.
+MAX_RELATED = 2
+RELATED_K = 5
 # Results per search: enough to find a figure, few enough to keep the judge's input small.
 SEARCH_K = 3
 LATER_STATEMENTS = 6
@@ -70,7 +87,7 @@ LATER_STATEMENTS = 6
 TEXT_CHARS = 500
 # Output limits, and what a call reserves against the budget.
 PLAN_OUTPUT_TOKENS = 800
-JUDGE_OUTPUT_TOKENS = 1_500
+JUDGE_OUTPUT_TOKENS = 2_500
 PLAN_OVERHEAD_TOKENS = 1_000
 JUDGE_OVERHEAD_TOKENS = 1_300
 # What a typical claim costs in output, for the estimate a run prints (docs/promises.md).
@@ -101,7 +118,48 @@ def rule_hash(promise: Promise) -> str:
     return hashlib.sha256(promise.resolution_rule.encode()).hexdigest()
 
 
-def facts_of(promise: Promise) -> PromiseFacts:
+# An open-ended claim not shown delivered this long after the statement is
+# `expired_unproven`.
+OPEN_ENDED_LIFETIME = timedelta(days=548)  # 18 months
+# Per-share targets, adjusted for stock splits made after the statement.
+_PER_SHARE = re.compile(r"\b(per share|a share|dividend|eps|earnings per share)\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimContext:
+    """What resolving a claim reads besides the promise: when its statement's article was
+    published, and the stock splits made since."""
+
+    statement_at: datetime | None = None
+    split_ratio: Decimal = Decimal(1)
+
+
+def is_per_share(promise: Promise) -> bool:
+    if promise.unit == "usd_per_share" or promise.metric == "eps":
+        return True
+    return promise.target_kind in NUMERIC_KINDS and bool(
+        _PER_SHARE.search(f"{promise.subject} {promise.target_text or ''}")
+    )
+
+
+async def claim_context(session: AsyncSession, promise: Promise, today: date) -> ClaimContext:
+    published = await session.scalar(
+        select(Article.published_at).where(Article.id == promise.article_id)
+    )
+    cik = await session.scalar(select(Company.cik).where(Company.ticker == promise.ticker))
+    ratio = Decimal(1)
+    if cik is not None:
+        until = promise.due_date or today
+        for split in (await session.scalars(select(StockSplit).where(StockSplit.cik == cik))).all():
+            if promise.statement_date < split.effective_date <= until:
+                ratio *= split.ratio
+    return ClaimContext(published, ratio)
+
+
+def facts_of(
+    promise: Promise, company_names: Sequence[str] = (), context: ClaimContext | None = None
+) -> PromiseFacts:
+    context = context or ClaimContext()
     return PromiseFacts(
         statement_date=promise.statement_date,
         due_date=promise.due_date,
@@ -111,6 +169,11 @@ def facts_of(promise: Promise) -> PromiseFacts:
         baseline_value=promise.baseline_value,
         resolution_rule=promise.resolution_rule,
         quote=promise.quote,
+        company_names=tuple(company_names),
+        statement_at=context.statement_at,
+        split_ratio=context.split_ratio,
+        per_share=is_per_share(promise),
+        expires=promise.statement_date + OPEN_ENDED_LIFETIME if promise.due_date is None else None,
     )
 
 
@@ -207,6 +270,7 @@ class Resolution:
     usage: Usage
     cost: Decimal
     cached: bool
+    seconds: float = 0.0
 
 
 def evidence_fingerprint(items: Mapping[str, Evidence]) -> list[str]:
@@ -256,6 +320,8 @@ def judge_prompt(
         "quote": promise.quote,
         "rule": promise.resolution_rule,
         "target": _target_line(promise),
+        "basis": promise.comparison_basis or "not stated",
+        "related": ", ".join(promise.related_companies) or "none",
         "due": promise.due_date.isoformat() if promise.due_date else "none (open-ended)",
         "grace": grace.isoformat() if grace else "no filing covering the due period yet",
         "today": today.isoformat(),
@@ -300,45 +366,87 @@ def _for_judge(items: Mapping[str, Evidence]) -> list[dict[str, Any]]:
     return out
 
 
-def tool_calls(promise: Promise, plan: EvidencePlan) -> list[tuple[str, dict[str, Any]]]:
+def tool_calls(
+    promise: Promise,
+    plan: EvidencePlan,
+    universe: Universe | None = None,
+    fiscal: FiscalCalendar | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
     """The plan as at most MAX_TOOL_CALLS calls, each limited to evidence dated after the
-    statement."""
+    statement: the metric's periods (always with the period the due date closes), the
+    company's later filings, news and later statements; then one search per related
+    company it names (its filings when it is covered, else news about it), with its own
+    RELATED_K results."""
     after = (promise.statement_date + timedelta(days=1)).isoformat()
     calls: list[tuple[str, dict[str, Any]]] = []
-    if promise.metric is not None and promise.metric in ACTUAL_METRICS and plan.actuals_periods:
-        calls.append(
-            (
-                "get_actuals",
-                {
-                    "ticker": promise.ticker,
-                    "metrics": ACTUAL_METRICS[promise.metric],
-                    "periods": plan.actuals_periods[:4],
-                    "vintage": "first",
-                },
+    if promise.metric is not None and promise.metric in ACTUAL_METRICS:
+        periods = list(plan.actuals_periods[:4])
+        if promise.due_date is not None and fiscal is not None:
+            year, quarter = covering_period(fiscal, promise.due_date, promise.measure_period)
+            target = f"FY{year}" if quarter is None else f"FY{year}Q{quarter}"
+            if target not in periods:
+                periods = [target, *periods][:4]
+        if periods:
+            calls.append(
+                (
+                    "get_actuals",
+                    {
+                        "ticker": promise.ticker,
+                        "metrics": ACTUAL_METRICS[promise.metric],
+                        "periods": periods,
+                        "vintage": "first",
+                    },
+                )
             )
-        )
-    if plan.check_later_statements:
-        calls.append(
+
+    def filings(query: str, ticker: str | None) -> tuple[str, dict[str, Any]]:
+        arguments: dict[str, Any] = {"query": query, "date_from": after, "k": SEARCH_K}
+        if ticker:
+            arguments["ticker"] = ticker
+        return "search_filings", arguments
+
+    def news(query: str, ticker: str | None) -> tuple[str, dict[str, Any]]:
+        arguments: dict[str, Any] = {"query": query, "date_from": after, "k": SEARCH_K}
+        if ticker:
+            arguments["ticker"] = ticker
+        return "search_news", arguments
+
+    own = [filings(q, promise.ticker) for q in plan.filing_queries[:3]]
+    own_news = [news(q, promise.ticker) for q in plan.news_queries[:2]]
+    # Each related company is searched on its own, with its own top results, beyond the
+    # cap: a partner's release is often the only document that reports the outcome.
+    related = []
+    topic = promise.event or promise.subject
+    for name in promise.related_companies[:MAX_RELATED]:
+        ticker = _covered_ticker(name, universe)
+        if ticker is not None and ticker != promise.ticker:
+            related.append(("search_filings", {**filings(topic, ticker)[1], "k": RELATED_K}))
+        elif ticker is None:
+            related.append(("search_news", {**news(f"{name} {topic}", None)[1], "k": RELATED_K}))
+    statements = (
+        [
             (
                 "get_statements",
                 {"ticker": promise.ticker, "date_from": after, "limit": LATER_STATEMENTS},
             )
-        )
-    for query in plan.filing_queries[:3]:
-        calls.append(
-            (
-                "search_filings",
-                {"query": query, "ticker": promise.ticker, "date_from": after, "k": SEARCH_K},
-            )
-        )
-    for query in plan.news_queries[:2]:
-        calls.append(
-            (
-                "search_news",
-                {"query": query, "ticker": promise.ticker, "date_from": after, "k": SEARCH_K},
-            )
-        )
-    return calls[:MAX_TOOL_CALLS]
+        ]
+        if plan.check_later_statements
+        else []
+    )
+    calls += own[:1] + own_news[:1] + statements + own[1:] + own_news[1:]
+    return calls[:MAX_TOOL_CALLS] + related
+
+
+def _covered_ticker(name: str, universe: Universe | None) -> str | None:
+    """The ticker of a company of the universe the name refers to (its ticker, name or
+    an alias), if any."""
+    if universe is None:
+        return None
+    wanted = name.strip().casefold()
+    for company in universe.companies:
+        if wanted == company.ticker.casefold() or wanted in (n.casefold() for n in company.names):
+            return None if company.news_only else company.ticker
+    return None
 
 
 async def measure(ctx: ToolContext, judgment: Judgment) -> Measured:
@@ -393,7 +501,9 @@ def build_resolver(deps: ResolveDeps, fiscal_notes: Mapping[str, str]) -> Any:
         promise: Promise = state["promise"]["row"]
         ctx: ToolContext = state["promise"]["ctx"]
         calls = []
-        for name, arguments in tool_calls(promise, EvidencePlan.model_validate(state["plan"])):
+        plan = EvidencePlan.model_validate(state["plan"])
+        fiscal = state["promise"].get("fiscal")
+        for name, arguments in tool_calls(promise, plan, ctx.universe, fiscal):
             output = await call_tool(ctx, name, arguments)
             calls.append(
                 {
@@ -428,9 +538,12 @@ def build_resolver(deps: ResolveDeps, fiscal_notes: Mapping[str, str]) -> Any:
         judgment = Judgment.model_validate(state["judgment"])
         measured = await measure(ctx, judgment)
         items = dict(ctx.evidence.items)
+        names = _company_names(promise.ticker, ctx.universe)
+        context = state["promise"].get("context")
         checked = check(
-            facts_of(promise), judgment, items, measured, state["promise"]["grace"], deps.today
-        )
+            facts_of(promise, names, context), judgment, items, measured,
+            state["promise"]["grace"], deps.today,
+        )  # fmt: skip
         return {"outcome": {"checked": checked, "measured": measured}, "evidence": items}
 
     graph = StateGraph(ResolveState)
@@ -457,11 +570,26 @@ def _usage(state: ResolveState, usage: Usage, cost: Decimal, cached: bool) -> di
 
 
 async def resolve_one(
-    graph: Any, deps: ResolveDeps, promise: Promise, grace: date | None
+    graph: Any,
+    deps: ResolveDeps,
+    promise: Promise,
+    grace: date | None,
+    fiscal: FiscalCalendar | None = None,
 ) -> Resolution:
     ctx = replace(deps.tools, evidence=EvidenceLog(), calls=[])
+    started = time.monotonic()
+    async with ctx.sessions() as session:
+        context = await claim_context(session, promise, deps.today)
     state = await graph.ainvoke(
-        {"promise": {"row": promise, "ctx": ctx, "grace": grace}},
+        {
+            "promise": {
+                "row": promise,
+                "ctx": ctx,
+                "grace": grace,
+                "fiscal": fiscal,
+                "context": context,
+            }
+        },
     )
     outcome = state["outcome"]
     usage_line = state.get("usage") or {}
@@ -478,7 +606,18 @@ async def resolve_one(
         usage=Usage(int(usage_line.get("input", 0)), int(usage_line.get("output", 0))),
         cost=Decimal(str(usage_line.get("cost", "0"))),
         cached=bool(usage_line.get("cached", True)),
+        seconds=time.monotonic() - started,
     )
+
+
+def _company_names(ticker: str, universe: Universe | None) -> list[str]:
+    """A company's own names (ticker, name, aliases): never key terms of its rules."""
+    names = [ticker]
+    if universe is not None:
+        for company in universe.companies:
+            if company.ticker == ticker:
+                names += company.names
+    return names
 
 
 # Runs.
@@ -527,6 +666,7 @@ async def plan_resolution(
                     Promise.current,
                     Promise.specificity.in_(("specific", "partial")),
                     Promise.target_kind.is_not(None),
+                    Promise.guidance_id.is_(None),  # scored with formal guidance
                 )
                 .order_by(Promise.statement_date, Promise.id)
             )
@@ -576,6 +716,8 @@ class ResolveResult:
     usage: Usage = field(default_factory=lambda: Usage(0, 0))
     cost: Decimal = Decimal(0)
     errors: list[str] = field(default_factory=list)
+    seconds: float = 0.0  # wall time of the company's claims
+    claim_seconds: list[float] = field(default_factory=list)  # each claim's own time
 
     @property
     def ok(self) -> bool:
@@ -588,35 +730,40 @@ async def resolve_promises(
     plans: Sequence[ResolvePlan],
     fiscal_notes: Mapping[str, str],
     *,
+    calendars: Mapping[str, FiscalCalendar] | None = None,
+    concurrency: int = CONCURRENCY,
     on_claim: Callable[[Candidate, str], None] | None = None,
     on_result: Callable[[ResolveResult], None] | None = None,
 ) -> list[ResolveResult]:
-    """Resolve every planned group and store its verdict on each member. Stops at the
-    cost cap, keeping what was resolved before it."""
+    """Resolve every planned group, `concurrency` claims at a time, and store its verdict
+    on each member. Stops at the cost cap, keeping what was resolved before it."""
     from talk_is_cheap.guidance.llm import CostCapReached, LlmError
 
     graph = build_resolver(deps, fiscal_notes)
     results = []
     stop = False
-    for plan in plans:
-        result = ResolveResult(plan.ticker)
-        for candidate in plan.candidates:
+    limit = asyncio.Semaphore(concurrency)
+
+    async def one(
+        candidate: Candidate, result: ResolveResult, fiscal: FiscalCalendar | None
+    ) -> None:
+        nonlocal stop
+        async with limit:
             if stop:
-                result.errors.append("not run: the cost cap or budget was reached")
-                break
+                return
             async with sessions() as session:
                 promise = await session.get(Promise, candidate.promise.id)
                 assert promise is not None
                 stored = await session.get(PromiseVerdict, promise.id)
             try:
-                resolution = await resolve_one(graph, deps, promise, candidate.grace)
+                resolution = await resolve_one(graph, deps, promise, candidate.grace, fiscal)
             except CostCapReached as exc:
                 stop = True
                 result.errors.append(f"promise {promise.id}: {exc}")
-                break
+                return
             except LlmError as exc:
                 result.errors.append(f"promise {promise.id}: {exc}")
-                continue
+                return
             if resolution.cached:
                 result.cached += 1
             else:
@@ -629,11 +776,22 @@ async def resolve_promises(
                 await store_verdict(session, candidate, resolution, deps.judge.name)
             verdict = resolution.checked.verdict
             result.resolved += 1
+            result.claim_seconds.append(resolution.seconds)
             result.verdicts[verdict] = result.verdicts.get(verdict, 0) + 1
             for name in resolution.checked.failed:
                 result.failed_checks[name] = result.failed_checks.get(name, 0) + 1
             if on_claim is not None:
                 on_claim(candidate, verdict)
+
+    for plan in plans:
+        result = ResolveResult(plan.ticker)
+        fiscal = (calendars or {}).get(plan.ticker)
+        started = time.monotonic()
+
+        await asyncio.gather(*(one(c, result, fiscal) for c in plan.candidates))
+        if stop:
+            result.errors.append("stopped: the cost cap or budget was reached")
+        result.seconds = time.monotonic() - started
         results.append(result)
         if on_result is not None:
             on_result(result)
@@ -658,15 +816,7 @@ async def store_verdict(
     head = candidate.promise
     items = resolution.evidence
     judgment = resolution.judgment
-    cited = [
-        _item_record(items[i], items)
-        for i in dict.fromkeys(
-            judgment.evidence_ids
-            + [m.evidence_id for m in judgment.measured]
-            + ([judgment.first_proof_id] if judgment.first_proof_id else [])
-        )
-        if i in items
-    ]
+    cited = [_item_record(items[i], items) for i in resolution.checked.cited if i in items]
     measured = resolution.measured
     checked = resolution.checked
     for member in candidate.members:
@@ -675,7 +825,8 @@ async def store_verdict(
             PromiseVerdict(
                 promise_id=member.id,
                 verdict=checked.verdict,
-                model_verdict=judgment.verdict,
+                model_verdict=checked.derived,
+                assessments=[a.model_dump() for a in judgment.assessments],
                 failed_checks=checked.failed,
                 checks=checked.checks,
                 measured_value=measured.value,
@@ -690,6 +841,8 @@ async def store_verdict(
                 reasoning=judgment.reasoning,
                 confidence=Decimal(str(round(judgment.confidence, 3))),
                 proof_date=checked.proof_date,
+                proof_date_source=checked.proof_date_source,
+                revised_before_due=checked.revised_before_due,
                 grace_end=candidate.grace,
                 days_late=checked.days_late,
                 rule_version=head.version,

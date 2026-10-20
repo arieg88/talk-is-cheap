@@ -137,6 +137,8 @@ def score_framing(label: ClaimLabel, promise: "Framed", score: FramingScore) -> 
 class ResolutionScore:
     pairs: list[tuple[str, str, str]] = field(default_factory=list)  # id, system, label
     missing: list[str] = field(default_factory=list)
+    # Labels with a revised_before_due flag: id, the system's flag, the label's.
+    flags: list[tuple[str, bool, bool]] = field(default_factory=list)
 
     def false_rate(self, verdicts: tuple[str, ...]) -> tuple[int, int]:
         """Of claims the system gave one of `verdicts`, how many the labels do not."""
@@ -192,7 +194,7 @@ async def evaluate_command(labels_dir: Path, dry: bool, details: bool) -> int:
     try:
         sessions = create_session_factory(engine)
         budget = await command_budget(sessions, settings, pricing, "eval promises")
-        template = framing_run.load_prompt()
+        templates: dict[str, str] = {}
         async with sessions() as session:
             fiscal = await calendars(session)
             to_frame = []
@@ -208,11 +210,22 @@ async def evaluate_command(labels_dir: Path, dry: bool, details: bool) -> int:
                     framing_score.missing.append(item.id)
                     continue
                 claim, role = found
-                prompt = framing_run.render_prompt(template, claim, role, fiscal.get(item.ticker))
-                to_frame.append((item, claim, prompt))
+                # The prompt the production run framed the claim with (its current
+                # promise's), so the benchmark measures what is stored.
+                version = await session.scalar(
+                    select(Promise.version).where(
+                        Promise.claim_key == claim.claim_key, Promise.current
+                    )
+                )
+                prompt_version = version.split("+")[0] if version else framing_run.PROMPT_VERSION
+                if prompt_version not in templates:
+                    templates[prompt_version] = framing_run.load_prompt(prompt_version)
+                prompt = framing_run.render_prompt(
+                    templates[prompt_version], claim, role, fiscal.get(item.ticker)
+                )
+                to_frame.append((item, claim, prompt, prompt_version))
             framing_calls = sum(
-                cache.get(label, framing_run.PROMPT_VERSION, p, FramingAnswer) is None
-                for *_, p in to_frame
+                cache.get(label, v, p, FramingAnswer) is None for *_, p, v in to_frame
             )
             promises = []
             resolution_score = ResolutionScore()
@@ -248,15 +261,17 @@ async def evaluate_command(labels_dir: Path, dry: bool, details: bool) -> int:
         else:
             framer = CacheOnlyModel(label, FramingAnswer)
         async with sessions() as session:
-            for item, claim, prompt in to_frame:
+            for item, claim, prompt, prompt_version in to_frame:
                 response = await complete(
-                    framer, prompt, framing_run.PROMPT_VERSION, cache, budget,
+                    framer, prompt, prompt_version, cache, budget,
                     framing_run.estimate_usage(prompt),
                 )  # fmt: skip
                 actuals = await framing_run._actuals(session, item.ticker)
+                guidance = await framing_run.guided_figures(session, item.ticker)
                 framed = frame(
-                    claim, response.extraction.framing(), fiscal.get(item.ticker), actuals
-                )
+                    claim, response.extraction.framing(), fiscal.get(item.ticker), actuals,
+                    guidance,
+                )  # fmt: skip
                 score_framing(item, framed, framing_score)
         try:
             planner = LangChainModel(
@@ -292,7 +307,9 @@ async def evaluate_command(labels_dir: Path, dry: bool, details: bool) -> int:
                 settings.promise_grace_days,
             )
             try:
-                resolution = await resolve.resolve_one(graph, deps, promise, end)
+                resolution = await resolve.resolve_one(
+                    graph, deps, promise, end, fiscal.get(item.ticker)
+                )
             except LlmError as exc:
                 print(f"{item.id}: {exc}", file=sys.stderr)
                 resolution_score.missing.append(item.id)
@@ -300,6 +317,14 @@ async def evaluate_command(labels_dir: Path, dry: bool, details: bool) -> int:
             resolution_score.pairs.append(
                 (item.id, resolution.checked.verdict, str(item.fields["verdict"]))
             )
+            if "revised_before_due" in item.fields:
+                resolution_score.flags.append(
+                    (
+                        item.id,
+                        resolution.checked.revised_before_due,
+                        bool(item.fields["revised_before_due"]),
+                    )
+                )
     finally:
         await engine.dispose()
     _report(framing_score, resolution_score, details)
@@ -325,6 +350,9 @@ def _report(framing: FramingScore, resolution: ResolutionScore, details: bool) -
     wrong, said = resolution.false_rate(("not_delivered",))
     print(f"  false 'not delivered' rate: {share(wrong, said)}")
     print(f"  cannot_determine rate: {share(*resolution.cannot_determine)}")
+    if resolution.flags:
+        agreed_flags = sum(system == label for _, system, label in resolution.flags)
+        print(f"  revised_before_due flag: {share(agreed_flags, len(resolution.flags))}")
     if resolution.missing:
         print(f"  labels without a current promise: {', '.join(resolution.missing)}")
     if details:

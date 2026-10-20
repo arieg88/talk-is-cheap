@@ -39,8 +39,12 @@ Verdict = Literal[
     "not_delivered",
     "walked_back",
     "too_early",
+    "expired_unproven",
     "cannot_determine",
 ]
+
+ComparisonBasis = Literal["yoy", "sequential", "absolute"]
+Finding = Literal["satisfies", "partly", "contradicts", "walks_back", "irrelevant"]
 
 TARGET_KINDS: tuple[str, ...] = TargetKind.__args__  # type: ignore[attr-defined]
 DEADLINE_TYPES: tuple[str, ...] = DeadlineType.__args__  # type: ignore[attr-defined]
@@ -157,6 +161,16 @@ class Framing(BaseModel):
         description="True when the claim is about entering a new market or launching a "
         "product the company does not sell yet.",
     )
+    related_companies: list[str] = Field(
+        default_factory=list,
+        description="Other companies the claim names as partners, customers, suppliers or "
+        "makers of the product (Dell, HP, Microsoft); used to widen the evidence search.",
+    )
+    comparison_basis: ComparisonBasis | None = Field(
+        default=None,
+        description="What a change is measured against: yoy (the same period a year "
+        "earlier), sequential (the period before), absolute (a level, not a change).",
+    )
 
 
 class EvidencePlan(BaseModel):
@@ -188,6 +202,8 @@ class EvidencePlan(BaseModel):
 
 
 class MeasuredSource(BaseModel):
+    model_config = ConfigDict(json_schema_extra=lambda s: _all_required(s))
+
     evidence_id: str = Field(description="The id of the evidence item holding the number.")
     span: str = Field(
         default="",
@@ -197,36 +213,30 @@ class MeasuredSource(BaseModel):
     )
 
 
-class Judgment(BaseModel):
-    """The verdict on one claim, from the gathered evidence only."""
+class Assessment(BaseModel):
+    model_config = ConfigDict(json_schema_extra=lambda s: _all_required(s))
 
-    verdict: Verdict
-    measured: list[MeasuredSource] = Field(
-        default_factory=list,
-        max_length=4,
-        description="Where the measured value comes from, for numeric targets: one item, or "
-        "several to add up or divide (measured_operation). Empty for events.",
-    )
-    measured_operation: Literal["value", "sum", "ratio"] = Field(
-        default="value",
-        description="value: the one measured number; sum: their total; ratio: the first "
-        "divided by the second.",
-    )
-    evidence_ids: list[str] = Field(
-        default_factory=list, description="Every evidence id the verdict rests on."
-    )
-    first_proof_id: str = Field(
-        default="",
-        description="For delivered or delivered_late: the earliest-dated evidence id that "
-        "shows the target was reached; else empty.",
-    )
-    partial_reason: str = Field(
-        default="",
-        description="For partly_delivered on a target without a number: what was and was "
-        "not delivered; else empty.",
-    )
-    reasoning: str = Field(description="At most 3 sentences.")
-    confidence: float = Field(ge=0, le=1)
+    evidence_id: str
+    finding: Finding
+    note: str = ""
+    # For a satisfying item: the exact text of the item that says when the thing
+    # happened ("effective June 7, 2024"), copied character for character; empty if the
+    # item gives no date. Code finds it in the item and reads the date.
+    event_date_text: str = ""
+
+
+class Judgment(BaseModel):
+    """What each gathered item says about the rule. The judge gives no verdict: code
+    derives it from the findings and the items' dates (`checks.py`)."""
+
+    model_config = ConfigDict(json_schema_extra=lambda s: _all_required(s))
+
+    assessments: list[Assessment] = Field(default_factory=list)
+    measured: list[MeasuredSource] = Field(default_factory=list, max_length=4)
+    measured_operation: Literal["value", "sum", "ratio"] = "value"
+    partial_reason: str = ""
+    reasoning: str = ""
+    confidence: float = Field(default=0.5, ge=0, le=1)
 
 
 def _all_required(schema: dict[str, Any]) -> None:
@@ -294,6 +304,8 @@ class FramingAnswer(BaseModel):
     baseline_period_text: str = ""
     deadline: DeadlineAnswer = Field(default_factory=DeadlineAnswer)
     new_market_or_product: bool = False
+    related_companies: list[str] = Field(default_factory=list)
+    comparison_basis: Literal["yoy", "sequential", "absolute", "none"] = "none"
 
     def framing(self) -> Framing:
         numeric = self.target_kind in ("multiple", "absolute", "change", "threshold")
@@ -314,4 +326,6 @@ class FramingAnswer(BaseModel):
             baseline_period_text=self.baseline_period_text.strip() or None,
             deadline=self.deadline.deadline(),
             new_market_or_product=self.new_market_or_product,
+            related_companies=[c.strip() for c in self.related_companies if c.strip()],
+            comparison_basis=None if self.comparison_basis == "none" else self.comparison_basis,
         )

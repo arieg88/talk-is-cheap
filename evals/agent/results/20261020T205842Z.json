@@ -1,0 +1,190 @@
+{
+ "run_at": "20261020T205842Z",
+ "model": "claude-haiku-5-5@low",
+ "dry_run": false,
+ "questions": 6,
+ "cost": 0.044796,
+ "scores": [
+  {
+   "id": "promise-nvda-blackwell",
+   "type": "guidance_check",
+   "question": "Did Nvidia deliver on what it said in May 2024 about Blackwell chips reaching the market later that year?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 1,
+   "llm_calls": 7,
+   "cached_calls": 0,
+   "cost": 0.0085356,
+   "seconds": 24.8,
+   "revisions": 2,
+   "verifier_failures": {
+    "llm_unsupported": 4
+   },
+   "failure_details": [
+    "0 llm_unsupported: Opening: Nvidia did not deliver on timing given in May 2024, verdicts differ by claim.: Tool verdicts are mixed (walked_back, delivered_late); the 'Mostly no' summary is a conclusion the cited items o",
+    "1 llm_unsupported: An April 2024 10-Q said Blackwell customer shipments would ramp in the second half of the fiscal year.: No citation; no April 2024 10-Q item is in the evidence.",
+    "2 llm_unsupported: Tool rates market claim walked_back: no shipments by Dec 31, 2024: E17 reasoning says no item clearly shows shipments by 2024-12-31; it does not state the 'no shipments' finding as fact, though close.",
+    "2 llm_unsupported: 2024 filings described ramp as planned for fiscal Q4 2025; later filings reported Blackwell revenue in FY2026: Cited E13 is a news item only; it does not state the filing details, which are in outcome"
+   ],
+   "answer": "Nvidia's May 2024 Blackwell timing claims received four scored verdicts from the tool: three \"walked_back\" and one \"delivered_late.\" - **Shipping start in Q2 2024:** Huang said Blackwell chips would start shipping in the second quarter, with production ramping in the third quarter, as reported by Business Insider [1]. The tool rates this \"walked_back\" because later filings moved shipments to Q4 (reported by businessinsider.com) [1]. Nvidia's July 2024 10-Q said the Blackwell production ramp was scheduled to begin in the fourth quarter [2]. - **Arriving on the market later in 2024:** CNBC reported that Blackwell-based chips were expected to begin hitting the market later that year (reported by cnbc.com) [3]. The tool rates this \"walked_back\" because no item shows shipments beginning by December 31, 2024 (reported by cnbc.com) [3]. Nvidia's 10-Q for the quarter ended April 2024 had said it expected to ramp Blackwell customer shipments in the second half of the fiscal year [4]. - **Data centers running on Blackwell by Q4:** Business Insider reported this claim (reported by businessinsider.com) [1]. The tool rates it \"walked_back\" because the FY2025 filings described Blackwell production and shipments as scheduled for Q4, and later filings show the ramp moved later (reported by businessinsider.com) [1]. - **Launch by end of 2024:** Fortune reported that Nvidia said it would get a later-year revenue boost from the Blackwell launch (reported by fortune.com) [5]. The tool rates this \"delivered_late,\" 239 days late (reported by fortune.com) [5]. That reasoning is thin, so this is the weakest of the four verdicts. Huang's May 2024 statement that Blackwell was \"in full production\" was not scored because it had no checkable target (reported by finance.yahoo.com) [6].\nLeft out because they could not be verified (not supported by the cited evidence): one statement.\n\nSources:\n[1] businessinsider.com: Jen-Hsun Huang on 2024-05-23 (reported by businessinsider.com): https://www.businessinsider.com/nvidia-demand-ai-chips-blackwell-hopper-ceo-jensen-huang-earnings-2024-5\n[2] outcome evidence (search_filings), 2024-08-28: https://www.sec.gov/Archives/edgar/data/1045810/000104581024000264/nvda-20240728.htm\n[3] cnbc.com: company statement on 2024-05-22 (reported by cnbc.com): https://www.cnbc.com/2024/05/22/nvidia-earnings-blackwell-transition-2-other-questions-ahead-of-report.html\n[4] outcome evidence (search_filings), 2024-05-29: https://www.sec.gov/Archives/edgar/data/1045810/000104581024000124/nvda-20240428.htm\n[5] fortune.com: company statement on 2024-05-23 (reported by fortune.com): https://fortune.com/2024/05/23/nvidias-landmark-performance-tech-ceo-capitalism/\n[6] finance.yahoo.com: Jen-Hsun Huang on 2024-05-22 (reported by finance.yahoo.com): https://finance.yahoo.com/news/nvidia-stock-jumps-big-earnings-044933064.html",
+   "error": null,
+   "passed": true
+  },
+  {
+   "id": "promise-nvda-dividend",
+   "type": "guidance_check",
+   "question": "Did Nvidia keep its promise to pay the raised dividend on June 28, 2024?",
+   "routed_as": "guidance_check",
+   "facts": 0.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [
+    "verdict (delivered) not stated"
+   ],
+   "tool_calls": 1,
+   "llm_calls": 7,
+   "cached_calls": 0,
+   "cost": 0.0065395,
+   "seconds": 19.1,
+   "revisions": 2,
+   "verifier_failures": {
+    "llm_prefer_primary": 1,
+    "llm_unsupported": 3
+   },
+   "failure_details": [
+    "0 llm_prefer_primary: Payment was to be $0.10 per share to holders of record on June 11: E11 is news only; the 10-Q gives $0.01 post-split for the same record date and payment, so the filing should be cited.",
+    "0 llm_unsupported: The only quarter in that window still paid $0.04: E9 says the dividend was $0.04 in FY2025Q1 but the cited item only says the increase was announced; it does not state the paid rate of $0.04.",
+    "1 llm_unsupported: $0.01 post-split equals the $0.10 pre-split rate announced in May 2024: Cited items give $0.10 pre-split rate in May but never state the $0.01 post-split equivalence; the 10-for-1 split is only implie",
+    "2 llm_unsupported: The tool scores that promise as delivered, based on the filing.: Cited E3 is the news item; its verdict 'delivered' rests on E2 which is cited only in the first sentence, but E3 itself cites E2 as out"
+   ],
+   "answer": "Yes. Nvidia's 10-Q says it \"increased our quarterly cash dividend to $0.01 per share on a post-Stock Split basis to all shareholders of record on June 11, 2024,\" and that \"our quarterly cash dividend was paid on June 28, 2024\" [1]. The promise, as reported by fool.com, was that the first increased dividend would be paid on June 28 [2]. The 10-Q's figure is post-split. The split itself was a ten-for-one split effective June 7, 2024 [3]. A separate promise, that the quarterly dividend would reach at least $0.10 in a quarter ending by June 28, 2024, was rated \"cannot_determine\" by the tool, because no item in that window shows the $0.10 rate being paid (reported by fool.com) [4].\nLeft out because they could not be verified (not supported by the cited evidence): one statement.\n\nSources:\n[1] outcome evidence (search_filings), 2024-08-28: https://www.sec.gov/Archives/edgar/data/1045810/000104581024000264/nvda-20240728.htm\n[2] fool.com: company statement on 2024-05-22 (reported by fool.com): https://www.fool.com/investing/2024/05/22/nvidia-announces-a-10-for-1-stock-split-heres-what/\n[3] outcome evidence (search_filings), 2024-11-20: https://www.sec.gov/Archives/edgar/data/1045810/000104581024000315/q3fy25pr.htm\n[4] fool.com: company statement on 2024-05-22 (reported by fool.com): https://www.fool.com/investing/2024/05/23/nvda-stock-earnings-stock-split-ai-stocks/",
+   "error": null,
+   "passed": false
+  },
+  {
+   "id": "promise-amd-ai-revenue-2024",
+   "type": "guidance_check",
+   "question": "AMD forecast $2 billion of AI-related revenue for 2024. Did it deliver on that promise?",
+   "routed_as": "guidance_check",
+   "facts": 0.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [
+    "verdict (cannot_determine) not stated"
+   ],
+   "tool_calls": 4,
+   "llm_calls": 6,
+   "cached_calls": 0,
+   "cost": 0.0086065,
+   "seconds": 20.7,
+   "revisions": 2,
+   "verifier_failures": {
+    "numbers_cited": 4,
+    "llm_unsupported": 2
+   },
+   "failure_details": [
+    "0 numbers_cited: a sentence with a number has no citation: AMD's $2 billion AI-revenue forecast for 2024 cannot be scored as delivered or missed.",
+    "0 numbers_cited: a sentence with a number has no citation: That segment includes CPUs, so it does not show whether the $2 billion AI target was met.",
+    "1 numbers_cited: a sentence with a number has no citation: AMD's $2 billion AI-revenue forecast for 2024 cannot be scored as delivered or missed.",
+    "1 numbers_cited: a sentence with a number has no citation: The filings do not break out AI revenue, so I could not check the $2 billion figure against actual results.",
+    "2 llm_unsupported: No AI-specific revenue figure was found in the filings searched, so forecast could not be checked against actual results: E12 is a 10-K excerpt; it cites no AI figure, but it doesn't establish what th",
+    "2 llm_unsupported: Because that segment also includes CPUs, it cannot show whether the AI target was met: E12 does not state this inference; it is the drafter's reasoning"
+   ],
+   "answer": "AMD's $2 billion AI-revenue forecast for 2024 cannot be scored as delivered or missed (reported by fool.com) [1]. The only record I found is a Motley Fool article from January 13, 2024, reporting the forecast, and the tool does not name the speaker (reported by fool.com) [1]. Its verdict is \"not comparable\" because the target is a segment figure while reported values are company totals (reported by fool.com) [1]. No formal FY2024 revenue guidance was issued within 45 days of that statement (reported by fool.com) [1]. Data Center revenue for 2024 was $12.6 billion, up 94% from 2023, driven by Instinct GPU and EPYC CPU sales [2].\nLeft out because they could not be verified (not supported by the cited evidence): 2 statements.\n\nSources:\n[1] fool.com, 2024-01-13: company statement on 2024-01-13 (reported by fool.com): https://www.fool.com/investing/2024/01/13/better-semiconductor-stock-nvidia-vs-amd/\n[2] AMD 10-K FY2024Q4, ITEM 7. MANAGEMENT\u2019S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS, characters 200069-201835: https://www.sec.gov/Archives/edgar/data/2488/000000248825000012/amd-20241228.htm",
+   "error": null,
+   "passed": false
+  },
+  {
+   "id": "promise-tsla-roadster-too-early",
+   "type": "guidance_check",
+   "question": "Did Musk deliver on what he said about Roadster production?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 3,
+   "llm_calls": 9,
+   "cached_calls": 0,
+   "cost": 0.0052853,
+   "seconds": 15.6,
+   "revisions": 2,
+   "verifier_failures": {
+    "llm_unsupported": 3
+   },
+   "failure_details": [
+    "0 llm_unsupported: Only one Musk claim about Roadster production is on record, and it cannot be judged yet.: No citation; the evidence shows only one promise record, but 'cannot be judged yet' is a verdict-type claim th",
+    "0 llm_unsupported: I found no earlier Musk statements on Roadster production in the promise records, and no management statements on it in the news data.: No citation; a search-scope claim the cited evidence does not es",
+    "1 llm_unsupported: It is too early to judge whether Musk delivered.: The evidence gives only 'not resolved yet'; it does not state that judging is too early."
+   ],
+   "answer": "Too early to judge. Musk said Tesla's Roadster will enter production in 2028, and that the car is unlikely to materially affect the company's revenue, as reported by stocktwits.com on October 17, 2026 [1]. The claim is true if Tesla starts Roadster production on or before December 31, 2028 (reported by stocktwits.com) [1]. The promise is marked \"not resolved yet\" (reported by stocktwits.com) [1].\n\nSources:\n[1] stocktwits.com: Elon Musk on 2026-10-17 (reported by stocktwits.com): https://stocktwits.com/news-articles/markets/equity/elon-musk-roadster-nvidia-space-ai-push-nadella-security-warning-mag-7-ceos-this-week/cZxjushRBtE",
+   "error": null,
+   "passed": true
+  },
+  {
+   "id": "promise-nvda-poised-vague",
+   "type": "guidance_check",
+   "question": "Did Jensen Huang deliver on his promise that Nvidia is poised for its next wave of growth?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 5,
+   "llm_calls": 8,
+   "cached_calls": 0,
+   "cost": 0.0069101,
+   "seconds": 18.4,
+   "revisions": 1,
+   "verifier_failures": {
+    "llm_unsupported": 2
+   },
+   "failure_details": [
+    "0 llm_unsupported: No stored promise matches 'poised for its next wave of growth'.: No cited evidence addresses the promise tracker or a search result; no citation given.",
+    "0 llm_unsupported: The promise tracker returned no Jensen Huang claims for Nvidia.: No cited evidence describes the tracker's results."
+   ],
+   "answer": "Huang did say it, but the claim cannot be scored, so there is no verdict on whether he delivered.\nOn May 22, 2024, he said \"We are poised for our next wave of growth,\" as reported by Fortune [1], Yahoo Finance [2] and Business Insider, which quoted it from the earnings call [3]. The claim is vague: it has no checkable target or deadline, so it is not scored and I cannot say whether he delivered on it (reported by fortune.com) [1].\nSeparately, news reports from fool.com say Huang is confident Nvidia's growth will continue unabated next year [4] and that the number of chips Nvidia sells will double in 2027 (reported by fool.com) [4]. Neither is scored, because the metric is not tracked in Nvidia's reported financials.\n\nSources:\n[1] fortune.com: Jen-Hsun Huang on 2024-05-22 (reported by fortune.com): https://fortune.com/2024/05/22/nvidia-shares-jump-4-as-the-ai-boom-fuels-a-another-blockbuster-quarter-and-better-than-expected-forecast/\n[2] finance.yahoo.com: Jen-Hsun Huang on 2024-05-22 (reported by finance.yahoo.com): https://finance.yahoo.com/news/nvidia-stock-jumps-big-earnings-044933064.html\n[3] businessinsider.com: Jen-Hsun Huang on 2024-05-22 (reported by businessinsider.com): https://www.businessinsider.com/nvidia-demand-ai-chips-blackwell-hopper-ceo-jensen-huang-earnings-2024-5\n[4] fool.com, 2026-10-19: Jen-Hsun Huang on 2026-10-19 (reported by fool.com): https://www.fool.com/investing/2026/10/18/here-s-what-a-usd10-000-investment-in-nvidia-stock-will-be-worth-by-2030/",
+   "error": null,
+   "passed": true
+  },
+  {
+   "id": "promise-track-record-best",
+   "type": "guidance_check",
+   "question": "Which executive's promises hold up best?",
+   "routed_as": "guidance_check",
+   "facts": 1.0,
+   "citations": true,
+   "grounded": true,
+   "refusal": true,
+   "notes": [],
+   "tool_calls": 1,
+   "llm_calls": 8,
+   "cached_calls": 0,
+   "cost": 0.008919,
+   "seconds": 21.3,
+   "revisions": 2,
+   "verifier_failures": {
+    "llm_unsupported": 6
+   },
+   "failure_details": [
+    "0 llm_unsupported: Executive-level groups are all 'too few to judge', requiring at least 5 resolved claims.: Evidence gives the 'too few to judge' labels but does not state the 5-claim threshold.",
+    "1 llm_unsupported: No executive has enough resolved promises for a rate, so the tool does not rank executives.: No citation given for this claim.",
+    "1 llm_unsupported: Each executive-level group is marked 'too few to judge'.: No citation given; Nvidia company group E4 is not marked so.",
+    "1 llm_unsupported: The only group with a rate is Nvidia at company level, not an individual.: No citation given for this claim.",
+    "1 llm_unsupported: Those figures describe the company's statements, not any one executive's.: No citation given for this interpretation.",
+    "1 llm_unsupported: Two claims are too few to support a rate.: No citation given for this claim."
+   ],
+   "answer": "No executive group has a rate that can be compared. Every executive-level group is marked \"too few to judge,\" so no individual executive's promises can be ranked as holding up best.\n- Jen-Hsun Huang: 8 claims, 2 resolved, both walked back; marked too few to judge [1][2]. His two resolved claims were on Blackwell shipments and on Blackwell chips running in data centers, both reported by businessinsider.com [2].\n- Apple's group: 1 resolved claim; too few to judge [3][4][5].\n- AMD's group: 0 resolved; too few to judge [6].\n- Qualcomm's group: 0 resolved; too few to judge [7].\n- Cristiano Amon (Qualcomm): 0 resolved; too few to judge.\n- Salesforce's group: 0 resolved; too few to judge.\n- Alphabet's group: 0 resolved; too few to judge [8][9].\n- Microsoft's group: 0 resolved; too few to judge [10].\n- Amazon's group: 0 resolved; too few to judge [11][12][13].\nThe only group with a rate is Nvidia at company level, not an executive group: 6 resolved claims out of 27, an on-time rate of 66.7%, 16.7% walked back, and a median of 239 days late [14][15][16].\n\nSources:\n[1] tomshardware.com: Jen-Hsun Huang on 2026-06-01 (reported by tomshardware.com): https://www.tomshardware.com/pc-components/cpus/nvidia-unveils-dgx-sparrk-roadmap-for-laptops-and-desktop-pcs-at-computex-2026-three-generations-outlined-rubin-followed-by-rosa-feynman\n[2] businessinsider.com: Jen-Hsun Huang on 2024-05-23 (reported by businessinsider.com): https://www.businessinsider.com/nvidia-demand-ai-chips-blackwell-hopper-ceo-jensen-huang-earnings-2024-5\n[3] finance.yahoo.com: company statement on 2026-07-30 (reported by finance.yahoo.com): https://finance.yahoo.com/markets/stocks/articles/why-apple-stock-dropped-friday-024453528.html\n[4] fool.com: company statement on 2026-07-29 (reported by fool.com): https://www.fool.com/investing/2026/07/29/better-buy-amid-tech-crown-shift-apple-vs-nvidia/\n[5] theverge.com: company spokesperson on 2026-07-29 (reported by theverge.com): https://www.theverge.com/tech/972583/apple-upgrade-program-deal\n[6] AMD Investor Relations: company statement on 2026-07-23 (reported by AMD Investor Relations): https://ir.amd.com/news-events/press-releases/detail/1294/aai-2026-amd-delivers-full-stack-compute-for-the-agentic-ai-era\n[7] tomshardware.com: company statement on 2026-06-01 (reported by tomshardware.com): https://www.tomshardware.com/laptops/qualcomm-aims-snapdragon-c-at-300-laptops-as-memory-costs-gut-the-budget-segment\n[8] fool.com: company statement on 2026-10-18 (reported by fool.com): https://www.fool.com/investing/2026/10/18/predict-alphabet-report-google-cloud-revenue/\n[9] cnbc.com: company statement on 2026-06-01 (reported by cnbc.com): https://www.cnbc.com/2026/06/01/alphabet-to-raise-80-billion-from-stock-sales-to-fund-ai-buildout.html\n[10] finance.yahoo.com: company statement on 2024-05-25 (reported by finance.yahoo.com): https://finance.yahoo.com/news/time-dump-nvidia-stock-advanced-073500897.html\n[11] finance.yahoo.com: company statement on 2026-06-02 (reported by finance.yahoo.com): https://finance.yahoo.com/markets/stocks/articles/bank-america-reiterates-amazon-stock-003700272.html\n[12] finance.yahoo.com: company statement on 2026-04-01 (reported by finance.yahoo.com): https://finance.yahoo.com/markets/stocks/articles/bank-america-reiterates-amazon-stock-003700272.html\n[13] theverge.com: company statement on 2024-11-07 (reported by theverge.com): https://www.theverge.com/24290345/return-to-office-mandates-amazon-productivity-remote-work-hybrid-decoder-podcast\n[14] fool.com: company statement on 2026-06-06 (reported by fool.com): https://www.fool.com/investing/2026/06/06/nvidias-next-big-growth-lever/\n[15] cnbc.com: company spokesperson on 2026-06-01 (reported by cnbc.com): https://www.cnbc.com/2026/05/31/nvidias-new-chip-to-power-fresh-line-of-windows-laptops-by-dell-hp.html\n[16] tomshardware.com: company statement on 2026-06-01 (reported by tomshardware.com): https://www.tomshardware.com/laptops/nvidia-unveils-rtx-spark-superchip-at-computex-2026-new-platform-promises-to-turn-windows-into-an-agentic-ai-os-with-arm-cpu-blackwell-gpu-and-128gb-unified-memory",
+   "error": null,
+   "passed": true
+  }
+ ]
+}

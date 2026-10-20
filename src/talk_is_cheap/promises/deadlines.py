@@ -2,7 +2,8 @@
 company's fiscal calendar. The model only says what the deadline is ("in 12 months",
 "end of year 2026", "fiscal year +1"); it never computes a date.
 
-- "in a year", said 2025-03-10: `relative`, 2026-03-10;
+- "in a year", said 2025-03-10: `relative`, 2026-03-10; "next month", said 2024-05-22:
+  `relative`, 2024-06-30 (the end of that month);
 - "by the end of next year": `explicit`, December 31 of that calendar year;
 - "first half of 2026", "by Q3 2026", "by June", "June 10, 2024", "next summer":
   `explicit`, the last day of that half, quarter or month, the day, the season's end;
@@ -10,8 +11,10 @@ company's fiscal calendar. The model only says what the deadline is ("in 12 mont
   company's calendar; "next quarter", "the fiscal fourth quarter": that quarter's end;
 - "over time", "eventually", none: `open_ended`, no due date.
 
-A quarter, month or season named without a year is the next one that ends on or after
-the statement date. A deadline that cannot be computed (a duration without an amount, a
+A month or season named without a year is the next one that ends on or after the
+statement date; a fiscal quarter named without a year is the next one whose results were
+not yet filed on the statement date (so a quarter that has just ended, before its
+results, is that quarter). A deadline that cannot be computed (a duration without an amount, a
 month without a number) is open-ended, with a note saying why.
 """
 
@@ -37,8 +40,14 @@ class Due:
 OPEN = Due(None, "open_ended")
 
 
-def due_date(deadline: Deadline, said: date, fiscal: FiscalCalendar | None) -> Due:
-    """When a claim said on `said` is due."""
+def due_date(
+    deadline: Deadline,
+    said: date,
+    fiscal: FiscalCalendar | None,
+    reported_through: FiscalQuarter | None = None,
+) -> Due:
+    """When a claim said on `said` is due. `reported_through` is the latest fiscal
+    quarter whose results were filed before `said`."""
     kind = deadline.type
     if kind == "none":
         return OPEN
@@ -69,6 +78,10 @@ def due_date(deadline: Deadline, said: date, fiscal: FiscalCalendar | None) -> D
             return Due(None, "open_ended", "a quarter without its number")
         return Due(_next_month_end(deadline, said, 3 * deadline.quarter), "explicit")
     if kind == "month":
+        if deadline.month is None and deadline.offset is not None:
+            # "this month", "next month": the end of the month that many months on.
+            index = said.year * 12 + said.month - 1 + deadline.offset
+            return Due(_month_end(index // 12, index % 12 + 1), "relative")
         if deadline.month is None:
             return Due(None, "open_ended", "a month without its number")
         return Due(_next_month_end(deadline, said, deadline.month), "explicit")
@@ -86,7 +99,7 @@ def due_date(deadline: Deadline, said: date, fiscal: FiscalCalendar | None) -> D
         )
         return Due(fiscal.year_end_in(year), "fiscal_period")
     assert kind == "fiscal_quarter"
-    return _fiscal_quarter(deadline, said, fiscal)
+    return _fiscal_quarter(deadline, said, fiscal, reported_through)
 
 
 def add_duration(start: date, amount: int, unit: str) -> date:
@@ -133,7 +146,12 @@ def _season_end(deadline: Deadline, said: date) -> date:
     return end if end >= said else date(said.year + 1, month, day)
 
 
-def _fiscal_quarter(deadline: Deadline, said: date, fiscal: FiscalCalendar) -> Due:
+def _fiscal_quarter(
+    deadline: Deadline,
+    said: date,
+    fiscal: FiscalCalendar,
+    reported_through: FiscalQuarter | None = None,
+) -> Due:
     under_way = _following(fiscal.quarter_ended_before(said))
     if deadline.quarter is None:
         quarter = under_way
@@ -142,11 +160,16 @@ def _fiscal_quarter(deadline: Deadline, said: date, fiscal: FiscalCalendar) -> D
         return Due(fiscal.quarter_end(quarter), "fiscal_period")
     if deadline.year is not None:
         quarter = FiscalQuarter(deadline.year, deadline.quarter)
+    elif deadline.offset is None:
+        # The next quarter of that number whose results were not out on the statement
+        # date: "the fiscal third quarter", said on the day its results came out, is that
+        # quarter, not the next year's.
+        first = _following(reported_through) if reported_through else under_way
+        quarter = FiscalQuarter(first.fiscal_year, deadline.quarter)
+        if quarter < first:
+            quarter = FiscalQuarter(first.fiscal_year + 1, deadline.quarter)
     else:
-        year = under_way.fiscal_year + (deadline.offset or 0)
-        quarter = FiscalQuarter(year, deadline.quarter)
-        if deadline.offset is None and quarter < under_way:
-            quarter = FiscalQuarter(year + 1, deadline.quarter)
+        quarter = FiscalQuarter(under_way.fiscal_year + deadline.offset, deadline.quarter)
     return Due(fiscal.quarter_end(quarter), "fiscal_period")
 
 

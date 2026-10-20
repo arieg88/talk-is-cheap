@@ -1862,6 +1862,17 @@ def build_parser() -> argparse.ArgumentParser:
     promised.add_argument("--bold", action="store_true", help="only bold claims")
     promised.add_argument("--note", help="with `review`: why")
     promised.add_argument(
+        "--promises",
+        type=lambda text: [int(i) for i in text.split(",") if i.strip()],
+        help="with `frame`: only the claims of these promise IDs (comma-separated)",
+    )
+    promised.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="with `frame`: frame every claim with the current prompt (claims otherwise "
+        "keep the prompt they were framed with)",
+    )
+    promised.add_argument(
         "--by", choices=("executive", "company"), default="executive", help="track-record groups"
     )
     promised.add_argument("--ticker", help="with `track-record`: one company")
@@ -2073,7 +2084,13 @@ def _promises(args: argparse.Namespace) -> int:
         case "frame":
             return asyncio.run(
                 commands.frame_command(
-                    args.tickers, args.limit, args.dry_run, args.missing_only, args.model
+                    args.tickers,
+                    args.limit,
+                    args.dry_run,
+                    args.missing_only,
+                    args.model,
+                    args.promises,
+                    args.upgrade,
                 )
             )
         case "resolve":
