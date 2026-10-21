@@ -27,6 +27,9 @@ from talk_is_cheap.news.archive_index import (
     parse_warc_record,
     read_capture,
     wayback_captures,
+    wayback_pages,
+    wayback_pages_query,
+    wayback_query,
 )
 from talk_is_cheap.news.archives import (
     ArchivesFile,
@@ -35,7 +38,9 @@ from talk_is_cheap.news.archives import (
     article_url,
     cc_units,
     load_archives_file,
+    month_progress,
     months,
+    periods_of,
     wayback_units,
 )
 from talk_is_cheap.news.http_cache import PoliteFetcher
@@ -211,36 +216,83 @@ def test_common_crawl_searches_each_crawl_by_static_prefix_and_year() -> None:
     ]
 
 
-def test_wayback_searches_the_missing_months_by_their_own_prefix_or_by_name() -> None:
+def test_wayback_searches_one_month_each_by_its_own_prefix_or_its_capture_time() -> None:
     missing = [date(2024, 5, 1), date(2024, 7, 1)]
     cnbc = wayback_units(PUBLISHERS["cnbc"], missing, ["nvidia"])
-    assert [(u.period, u.prefix, u.since) for u in cnbc] == [
+    assert [(u.period, u.prefix, u.month) for u in cnbc] == [
         ("2024-05", "www.cnbc.com/2024/05/", None),
         ("2024-07", "www.cnbc.com/2024/07/", None),
     ]
     verge = wayback_units(PUBLISHERS["theverge"], missing, ["nvidia"])
-    assert [u.prefix for u in verge] == [
-        "www.theverge.com/2024/5/",
-        "www.theverge.com/2024/7/",
-        "www.theverge.com/news/",
+    # A format without a date in its path is searched month by month too, by capture
+    # time (`from`/`to`).
+    assert [(u.period, u.prefix, u.month) for u in verge] == [
+        ("2024-05", "www.theverge.com/2024/5/", None),
+        ("2024-05", "www.theverge.com/news/", date(2024, 5, 1)),
+        ("2024-07", "www.theverge.com/2024/7/", None),
+        ("2024-07", "www.theverge.com/news/", date(2024, 7, 1)),
     ]
-    # An undated format is searched once over the span of missing months.
-    assert (verge[-1].period, verge[-1].since, verge[-1].until) == (
-        "2024-05..2024-07",
-        date(2024, 5, 1),
-        date(2024, 7, 31),
-    )
     yahoo = wayback_units(PUBLISHERS["yahoo"], missing, ["amd", "nvidia"])
-    assert [u.prefix for u in yahoo] == [
-        "finance.yahoo.com/news/amd",
-        "finance.yahoo.com/news/nvidia",
+    assert [(u.period, u.prefix) for u in yahoo] == [
+        ("2024-05", "finance.yahoo.com/news/amd"),
+        ("2024-05", "finance.yahoo.com/news/nvidia"),
+        ("2024-07", "finance.yahoo.com/news/amd"),
+        ("2024-07", "finance.yahoo.com/news/nvidia"),
     ]
+    assert {u.month for u in yahoo} == set(missing)
+    tomshardware = wayback_units(PUBLISHERS["tomshardware"], missing[:1], ["nvidia"])
+    assert all(u.month == missing[0] for u in tomshardware)
+    assert len(tomshardware) == len(PUBLISHERS["tomshardware"].patterns)
     assert wayback_units(PUBLISHERS["cnbc"], [], ["nvidia"]) == []
     assert months(date(2024, 11, 15), date(2025, 2, 1)) == [
         date(2024, 11, 1),
         date(2024, 12, 1),
         date(2025, 1, 1),
         date(2025, 2, 1),
+    ]
+
+
+def test_wayback_queries_ask_for_one_month_and_only_the_fields_read() -> None:
+    news = wayback_units(PUBLISHERS["theverge"], [date(2024, 5, 1)], ["nvidia"])[1]
+    regex = SLUGS.url_regex()
+    assert wayback_query(news.prefix, regex, news.month) == [
+        ("url", "www.theverge.com/news/"),
+        ("matchType", "prefix"),
+        ("output", "json"),
+        ("fl", "timestamp,original"),
+        ("filter", "statuscode:200"),
+        ("filter", "mimetype:text/html"),
+        ("filter", f"original:{regex}"),
+        ("collapse", "urlkey"),
+        ("from", "202405"),
+        ("to", "202405"),
+    ]
+    assert wayback_query(news.prefix, regex, news.month, page=3)[-1] == ("page", "3")
+    # A dated prefix is its month already: no capture-time limit.
+    dated = dict(wayback_query("www.cnbc.com/2024/05/", regex))
+    assert "from" not in dated and "to" not in dated and "page" not in dated
+    assert wayback_pages_query(news.prefix) == [
+        ("url", "www.theverge.com/news/"),
+        ("matchType", "prefix"),
+        ("showNumPages", "true"),
+    ]
+
+
+def test_months_stand_done_failed_or_left() -> None:
+    missing = [date(2024, 5, 1), date(2024, 6, 1), date(2024, 7, 1), date(2024, 8, 1)]
+    units = wayback_units(PUBLISHERS["theverge"], missing, ["nvidia"])
+    states = {
+        ("2024-05", "www.theverge.com/2024/5/"): True,
+        ("2024-05", "www.theverge.com/news/"): True,  # done: both searches complete
+        ("2024-06", "www.theverge.com/2024/6/"): True,
+        ("2024-06", "www.theverge.com/news/"): False,  # failed: one search failed
+        ("2024-07", "www.theverge.com/2024/7/"): True,  # left: /news/ not searched yet
+    }
+    found = month_progress(units, states)
+    assert (found.done, found.failed, found.left, found.months) == (1, 1, 2, 4)
+    assert periods_of("2024-05..2024-07") == ["2024-05", "2024-06", "2024-07"]
+    assert periods_of("2024-05") == ["2024-05"] and periods_of("CC-MAIN-2024-22") == [
+        "CC-MAIN-2024-22"
     ]
 
 
@@ -410,3 +462,28 @@ async def test_a_page_cut_off_by_the_index_keeps_its_whole_lines(tmp_path: Path)
         async with httpx.AsyncClient() as client:
             page = await cc_captures(fetcher(client, tmp_path), "CC-MAIN-2025-38", "x/", 0)
     assert page.truncated and len(page.captures) == 2 and route.call_count == 1
+
+
+async def test_a_month_is_asked_its_page_count_then_read_page_by_page(
+    tmp_path: Path,
+) -> None:
+    with respx.mock(assert_all_called=True) as router:
+        pages = router.get(url__startswith=WAYBACK_CDX_URL, params={"showNumPages": "true"}).mock(
+            return_value=httpx.Response(200, text="2\n")
+        )
+        rows = router.get(url__startswith=WAYBACK_CDX_URL, params={"page": "1"}).mock(
+            return_value=httpx.Response(200, json=CDX)
+        )
+        async with httpx.AsyncClient() as client:
+            wayback = fetcher(client, tmp_path, "wayback")
+            assert await wayback_pages(wayback, "www.theregister.com/") == 2
+            assert await wayback_pages(wayback, "www.theregister.com/") == 2
+            found = await wayback_captures(
+                wayback, "www.theregister.com/", ".*", date(2026, 9, 1), page=1
+            )
+    assert pages.call_count == 2  # the count is never cached: it grows with the archive
+    query = rows.calls.last.request.url.params
+    assert (query["from"], query["to"], query["page"]) == ("202609", "202609", "1")
+    assert query["fl"] == "timestamp,original" and query["collapse"] == "urlkey"
+    assert query.get_list("filter")[:2] == ["statuscode:200", "mimetype:text/html"]
+    assert [c.url for c in found] == [CDX[1][1]] and found[0].status == 200

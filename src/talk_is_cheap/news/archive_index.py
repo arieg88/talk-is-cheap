@@ -6,13 +6,20 @@ captures they hold, and the pages read from them.
   a page is filtered on the server
   by status and MIME type (the index ignores URL filters). A capture is read with one
   HTTP range request for its WARC record at `data.commoncrawl.org` (no S3 access).
-- Wayback Machine (`web.archive.org/cdx/search/cdx`): one query per URL prefix, filtered
-  on the server by status, MIME type and a regular expression over the URL, with
-  capture times limited by `from`/`to`. A capture is read raw (the
-  `id_` URL), as the publisher served it.
+- Wayback Machine (`web.archive.org/cdx/search/cdx`): one query per URL prefix and
+  month, filtered on the server by status, MIME type and a regular expression over the
+  URL, collapsed to one row per URL, with only the timestamp and URL returned; a prefix
+  without a date in its path is limited to the month's captures by `from`/`to`
+  (YYYYMM). A month too large to answer (504) is read in the index's pages
+  (`showNumPages`, then `page`). A capture is read raw (the `id_` URL), as the
+  publisher served it.
 
-Requests go through `http_cache.PoliteFetcher`: Common Crawl at most one a second,
-Wayback one every three seconds, each with backoff on 429 and 5xx and a disk cache.
+Requests go through `http_cache.PoliteFetcher` with a disk cache: Common Crawl at most
+one a second, with backoff on 429 and 5xx; the Wayback Machine at the pace the Internet
+Archive asks clients to keep (the `wayback` library's limits: a CDX search every 2.5
+seconds, 80% of 30 a minute; up to 8 archived pages a second), with waits matched to
+each failure (`WAYBACK_RETRY`); when the archive seems to block us, searches pause
+until a one-row probe query is answered.
 """
 
 import gzip
@@ -27,7 +34,7 @@ from urllib.parse import urlencode
 from lxml import etree
 from lxml import html as lxml_html
 
-from talk_is_cheap.news.http_cache import CachedResponse, PoliteFetcher
+from talk_is_cheap.news.http_cache import CachedResponse, PoliteFetcher, RetryPolicy
 from talk_is_cheap.news.normalize import parse_timestamp
 
 COLLINFO_URL = "https://index.commoncrawl.org/collinfo.json"
@@ -41,7 +48,15 @@ CC_INTERVAL = 1.0  # seconds between requests to Common Crawl
 # Index blocks per page (about 3,000 captures each). The index cuts answers off at about
 # 960 KB: a page of the default five blocks never arrives whole for a large site.
 CC_PAGE_SIZE = 1
-WAYBACK_INTERVAL = 3.0  # seconds between requests to the Wayback Machine
+WAYBACK_INTERVAL = 2.5  # seconds between CDX searches (80% of 30 a minute)
+WAYBACK_PAGE_INTERVAL = 0.125  # seconds between archived page reads (8 a second)
+# 503: at once, then after 2, 4 and 8 seconds. 504: not retried (the search reads the
+# month in pages instead). 429: once, after Retry-After or 60 seconds. 3 connection
+# timeouts in a row: searches pause, and `WAYBACK_PROBE` is sent once a minute until it
+# is answered.
+WAYBACK_RETRY = RetryPolicy()
+# The smallest CDX query: one row of one URL.
+WAYBACK_PROBE = (WAYBACK_CDX_URL, {"url": "archive.org", "output": "json", "limit": "1"})
 
 
 class ArchiveError(Exception):
@@ -213,50 +228,85 @@ def _cc_capture(row: dict[str, Any]) -> Capture | None:
         return None
 
 
-async def wayback_captures(
-    fetcher: PoliteFetcher,
-    prefix: str,
-    url_regex: str,
-    since: date | None = None,
-    until: date | None = None,
-) -> list[Capture]:
-    """Successful HTML captures under a URL prefix whose URL matches `url_regex`,
-    captured between `since` and `until` (inclusive months when given), one per URL key
-    (Wayback collapses repeats)."""
+def wayback_query(
+    prefix: str, url_regex: str, month: date | None = None, page: int | None = None
+) -> list[tuple[str, str]]:
+    """The CDX query of a prefix: successful HTML captures whose URL matches
+    `url_regex`, one per URL (`collapse=urlkey`), only the fields read (timestamp and
+    URL); captured in `month` when given (`from` and `to`, YYYYMM: the whole month);
+    one page of the index when `page` is given."""
     params = [
         ("url", prefix),
         ("matchType", "prefix"),
         ("output", "json"),
-        ("fl", "timestamp,original,statuscode,mimetype"),
+        ("fl", "timestamp,original"),
         ("filter", "statuscode:200"),
         ("filter", "mimetype:text/html"),
         ("filter", f"original:{url_regex}"),
         ("collapse", "urlkey"),
     ]
-    if since is not None:
-        params.append(("from", since.strftime("%Y%m%d")))
-    if until is not None:
-        params.append(("to", until.strftime("%Y%m%d")))
-    response = await fetcher.get(WAYBACK_CDX_URL + "?" + _encode(params), accept=_json_answer)
+    if month is not None:
+        params += [("from", f"{month:%Y%m}"), ("to", f"{month:%Y%m}")]
+    if page is not None:
+        params.append(("page", str(page)))
+    return params
+
+
+def wayback_pages_query(prefix: str) -> list[tuple[str, str]]:
+    """The query for how many index pages a prefix has. The count is of the prefix's
+    index blocks, whatever the filters and capture times."""
+    return [("url", prefix), ("matchType", "prefix"), ("showNumPages", "true")]
+
+
+async def wayback_pages(fetcher: PoliteFetcher, prefix: str) -> int:
+    """How many index pages a prefix query has (0 when nothing is captured under it).
+    Not cached: the count grows as the archive does."""
+    response = await fetcher.get(
+        WAYBACK_CDX_URL + "?" + _encode(wayback_pages_query(prefix)),
+        cache=False,
+        accept=lambda r: r.status != 200 or r.text.strip().isdigit(),
+    )
+    if response.status == 404:
+        return 0
     if response.status != 200:
-        raise ArchiveError(f"Wayback {prefix}: HTTP {response.status}: {response.text[:200]}")
+        raise ArchiveError(f"Wayback {prefix} pages: HTTP {response.status}")
+    return int(response.text.strip())
+
+
+async def wayback_captures(
+    fetcher: PoliteFetcher,
+    prefix: str,
+    url_regex: str,
+    month: date | None = None,
+    page: int | None = None,
+) -> list[Capture]:
+    """The captures `wayback_query` asks for. The server filters status and MIME type,
+    so every row is a successful HTML capture."""
+    params = wayback_query(prefix, url_regex, month, page)
+    response = await fetcher.get(WAYBACK_CDX_URL + "?" + _encode(params), accept=_json_answer)
+    where = prefix + (f" {month:%Y-%m}" if month else "")
+    where += f" page {page}" if page is not None else ""
+    if response.status != 200:
+        raise ArchiveError(f"Wayback {where}: HTTP {response.status}: {response.text[:200]}")
     body = response.text.strip()
     if not body:
         return []
     try:
         rows = json.loads(body)
     except json.JSONDecodeError as exc:
-        raise ArchiveError(f"Wayback {prefix}: {body[:200]}") from exc
+        raise ArchiveError(f"Wayback {where}: {body[:200]}") from exc
     captures = []
-    for row in rows[1:]:  # the first row names the fields
+    for row in rows:
+        if row[:1] == ["timestamp"]:  # the row that names the fields
+            continue
         try:
             captures.append(
                 Capture(
                     source=WAYBACK,
                     url=str(row[1]),
                     timestamp=_timestamp(str(row[0])),
-                    status=int(row[2]),
-                    mime=str(row[3]),
+                    status=200,
+                    mime="text/html",
                 )
             )
         except (IndexError, ValueError):

@@ -11,7 +11,11 @@ its articles and how to read the date from a URL.
    which also filters URLs on the server (a name and a claim word), is searched for the months
    Common Crawl has no captures for (per publisher; a month of a URL without a date is
    its capture month). Each search is recorded in `archive_searches` once its results
-   are stored, so a re-run skips it.
+   are stored, so a re-run skips it. Wayback is searched one month per query: by the
+   month's own prefix, or, for a prefix without a date in its path, by `from`/`to`; a
+   month too large to answer at once (504) is read in the index's pages. A month that
+   fails (a page still 504, or every retry used up) is left incomplete, so a later run
+   searches only the failed and unsearched months.
 2. **Filter**, free, before any download (`SlugFilter`): the URL must be an article of
    a configured format, its slug must name a company of universe.yaml (ticker, name or
    alias) or one of its executives, contain a claim word, and contain none of that
@@ -57,6 +61,7 @@ from talk_is_cheap.news.archive_index import (
     page_metadata,
     read_capture,
     wayback_captures,
+    wayback_pages,
 )
 from talk_is_cheap.news.article_text import (
     PAYWALL_MARKERS,
@@ -68,7 +73,7 @@ from talk_is_cheap.news.article_text import (
 )
 from talk_is_cheap.news.article_text import Candidate as ArticleCandidate
 from talk_is_cheap.news.article_text import store as store_text
-from talk_is_cheap.news.http_cache import PoliteFetcher, ServiceUnavailable
+from talk_is_cheap.news.http_cache import GatewayTimeout, PoliteFetcher, ServiceUnavailable
 from talk_is_cheap.news.linking import CompanyMatcher, Link
 from talk_is_cheap.news.normalize import canonical_url, url_hash
 from talk_is_cheap.news.records import RawItem, TimePrecision
@@ -278,11 +283,11 @@ def _url_date(pattern: ArchivePattern, path: str) -> date | None:
 class SearchUnit:
     publisher: ArchivePublisher
     source: str
-    period: str  # crawl id, YYYY-MM, or a span of months
+    period: str  # crawl id, or YYYY-MM
     prefix: str  # domain and path
     crawl: str | None = None
-    since: date | None = None  # Wayback capture times
-    until: date | None = None
+    # Wayback, for a prefix without a date in its path: the month of the captures.
+    month: date | None = None
 
 
 def months(since: date, until: date) -> list[date]:
@@ -332,34 +337,29 @@ def wayback_units(
     missing: Sequence[date],
     terms: Sequence[str],
 ) -> list[SearchUnit]:
-    """Wayback searches for the months Common Crawl has nothing for: a month's own
-    prefix when the URL format has one; else one search per name ({term}), or one of
-    the whole path, over the span of those months (a prefix scanned once per month
-    would be scanned in full each time)."""
-    if not missing:
-        return []
+    """Wayback searches for the months Common Crawl has nothing for, one month each:
+    the month's own prefix when the URL format has one; else each name's prefix
+    ({term}), or the whole path, limited to the month's captures. A query over many
+    months of a large prefix does not answer in time."""
     units = []
-    first, last = missing[0], month_end(missing[-1])
-    span = f"{first:%Y-%m}..{last:%Y-%m}" if (first.year, first.month) != (
-        last.year, last.month
-    ) else f"{first:%Y-%m}"  # fmt: skip
-    for pattern in publisher.patterns:
-        if pattern.has_month:
-            for month in missing:
+    for month in missing:
+        period = f"{month:%Y-%m}"
+        for pattern in publisher.patterns:
+            if pattern.has_month:
                 path = (
                     pattern.path.replace("{year}", str(month.year))
                     .replace("{month}", f"{month.month:02d}")
                     .replace("{m}", str(month.month))
                 )
                 units += [
-                    SearchUnit(publisher, WAYBACK, f"{month:%Y-%m}", publisher.domain + p)
+                    SearchUnit(publisher, WAYBACK, period, publisher.domain + p)
                     for p in _expand_terms(path, terms)
                 ]
-        else:
-            units += [
-                SearchUnit(publisher, WAYBACK, span, publisher.domain + p, since=first, until=last)
-                for p in _expand_terms(pattern.path, terms)
-            ]
+            else:
+                units += [
+                    SearchUnit(publisher, WAYBACK, period, publisher.domain + p, month=month)
+                    for p in _expand_terms(pattern.path, terms)
+                ]
     return units
 
 
@@ -373,15 +373,70 @@ def month_end(month: date) -> date:
 
 
 async def searched(session: AsyncSession, publisher: str, source: str) -> set[tuple[str, str]]:
-    """The (period, prefix) searches completed for a publisher and source."""
+    """The (period, prefix) searches completed for a publisher and source; a search over
+    a span of months ("2024-05..2024-07") counts for each month in it."""
+    states = await search_states(session, publisher, source)
+    return {key for key, complete in states.items() if complete}
+
+
+async def search_states(
+    session: AsyncSession, publisher: str, source: str
+) -> dict[tuple[str, str], bool]:
+    """Each (period, prefix) searched before, and whether it is complete. A search over
+    a span of months stands for each of its months; a complete search wins over one
+    that failed."""
     rows = await session.execute(
-        select(ArchiveSearch.period, ArchiveSearch.prefix).where(
-            ArchiveSearch.publisher == publisher,
-            ArchiveSearch.source == source,
-            ArchiveSearch.complete,
+        select(ArchiveSearch.period, ArchiveSearch.prefix, ArchiveSearch.complete).where(
+            ArchiveSearch.publisher == publisher, ArchiveSearch.source == source
         )
     )
-    return {(p, x) for p, x in rows}
+    states: dict[tuple[str, str], bool] = {}
+    for period, prefix, complete in rows:
+        for one in periods_of(period):
+            states[(one, prefix)] = states.get((one, prefix), False) or complete
+    return states
+
+
+def periods_of(period: str) -> list[str]:
+    """The months of a span ("2024-05..2024-07"); any other period is itself."""
+    found = re.fullmatch(r"(\d{4})-(\d{2})\.\.(\d{4})-(\d{2})", period)
+    if found is None:
+        return [period]
+    first_year, first_month, last_year, last_month = map(int, found.groups())
+    return [
+        f"{m:%Y-%m}"
+        for m in months(date(first_year, first_month, 1), date(last_year, last_month, 1))
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class MonthProgress:
+    """A publisher's Wayback months: every search of the month complete (done), one
+    that failed and is left for a later run (failed), or not searched yet (left)."""
+
+    done: int
+    failed: int
+    left: int
+
+    @property
+    def months(self) -> int:
+        return self.done + self.failed + self.left
+
+
+def month_progress(
+    units: Sequence[SearchUnit], states: dict[tuple[str, str], bool]
+) -> MonthProgress:
+    """How a publisher's months stand, from every search they need (`wayback_units`)
+    and what is recorded (`search_states`)."""
+    by_month: dict[str, list[bool | None]] = defaultdict(list)
+    for unit in units:
+        by_month[unit.period].append(states.get((unit.period, unit.prefix)))
+    done = sum(all(s is True for s in found) for found in by_month.values())
+    failed = sum(
+        any(s is False for s in found) and not all(s is True for s in found)
+        for found in by_month.values()
+    )
+    return MonthProgress(done, failed, len(by_month) - done - failed)
 
 
 async def covered_months(session: AsyncSession, publisher: str) -> set[date]:
@@ -418,11 +473,16 @@ async def run_search(
     since: date,
     *,
     on_page: Callable[[SearchUnit, int, int, "SearchResult"], None] | None = None,
+    on_split: Callable[[SearchUnit, str], None] | None = None,
+    page_counts: dict[str, int] | None = None,
 ) -> SearchResult:
     """Search one unit, storing the captures that pass the filter and the search's
     progress as each answer arrives: a Common Crawl search page by page (resumed at the
-    first page not done), a Wayback search in one answer. `on_page` is told after each
-    page: (unit, pages done, pages, result so far)."""
+    first page not done); a Wayback month in one answer, or, when that answer is a 504,
+    split at once into the index's pages, read one by one and resumed like Common
+    Crawl's. A page that is still a 504 fails the month. A prefix's page count is asked
+    once per run (`page_counts`). `on_page` is told after each page: (unit, pages done,
+    pages, result so far); `on_split` why a month is read in pages."""
     result = SearchResult(unit)
     before = fetcher.requests
     async with sessions() as session, session.begin():
@@ -440,11 +500,36 @@ async def run_search(
                     on_page(unit, page + 1, pages, result)
             await _finish_search(sessions, unit, pages, fetcher.requests - before)
         else:
-            found = await wayback_captures(
-                fetcher, unit.prefix, slugs.url_regex(), unit.since, unit.until
-            )
-            await _store_found(sessions, unit, found, slugs, since, result, pages=1, pages_done=1)
-            await _finish_search(sessions, unit, 1, fetcher.requests - before)
+            regex = slugs.url_regex()
+            if not done:  # a month read in pages before resumes at its next page
+                try:
+                    found = await wayback_captures(fetcher, unit.prefix, regex, unit.month)
+                except GatewayTimeout:
+                    found = None
+                if found is not None:
+                    await _store_found(sessions, unit, found, slugs, since, result,
+                                       pages=1, pages_done=1)  # fmt: skip
+                    await _finish_search(sessions, unit, 1, fetcher.requests - before)
+                    result.requests = fetcher.requests - before
+                    return result
+            counts = page_counts if page_counts is not None else {}
+            if unit.prefix not in counts:
+                counts[unit.prefix] = await wayback_pages(fetcher, unit.prefix)
+            pages = counts[unit.prefix]
+            if pages <= 1:
+                raise GatewayTimeout(
+                    f"Wayback {unit.prefix} {unit.period}: HTTP 504 for the month, which "
+                    f"has {pages} index page{'s' * (pages != 1)}: nothing smaller to ask"
+                )
+            if on_split is not None and not done:
+                on_split(unit, f"HTTP 504 for the month: reading its {pages} index pages")
+            for page in range(done, pages):
+                found = await wayback_captures(fetcher, unit.prefix, regex, unit.month, page)
+                await _store_found(sessions, unit, found, slugs, since, result,
+                                   pages=pages, pages_done=page + 1)  # fmt: skip
+                if on_page is not None:
+                    on_page(unit, page + 1, pages, result)
+            await _finish_search(sessions, unit, pages, fetcher.requests - before)
     except (ServiceUnavailable, ArchiveError) as exc:
         result.error = str(exc)
     result.requests = fetcher.requests - before

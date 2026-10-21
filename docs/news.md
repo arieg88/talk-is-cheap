@@ -420,16 +420,34 @@ the URL take it from the page's metadata.
 - *Wayback Machine* (`web.archive.org/cdx/search/cdx`): for each month that ended at
   least 7 days ago (`SETTLE_TIME`; later days are still being archived, and RSS and
   Finnhub cover them) and that Common Crawl holds no article URL of the publisher for (by
-  URL date, else capture month; filtered or not), a query of that month's prefix
-  (`www.cnbc.com/2024/05/`) when the format has one; else one query per company name at
-  the start of the slug (`finance.yahoo.com/news/nvidia`), or of the whole path, over the
-  span of missing months. The server filters by status, HTML and a regular expression (a
-  name and a claim word anywhere in the URL, any case), and collapses repeats. A query
-  of a whole year of CNBC did not answer within 4.5 minutes, so queries stay per month.
+  URL date, else capture month; filtered or not), **one query per month**: of that
+  month's prefix (`www.cnbc.com/2024/05/`) when the format has one; else of each company
+  name at the start of the slug (`finance.yahoo.com/news/nvidia`), or of the whole
+  section (`www.theverge.com/news/`), limited to the month's captures with `from` and
+  `to` (`202405`, the whole month). A query of a whole year of CNBC did not answer
+  within 4.5 minutes, and one of The Verge's `/news/` over 31 months never answered, so
+  no query spans months.
+- Each answer is kept small: the server filters by status (`statuscode:200`), HTML
+  (`mimetype:text/html`) and a regular expression (a name and a claim word anywhere in
+  the URL, any case), collapses repeats of a URL (`collapse=urlkey`), and returns only
+  the timestamp and URL (`fl`).
+- **A 504 splits the query.** A month answered with 504 (too large to scan in time) is
+  not asked again: it is split at once into the prefix's index pages (`showNumPages`,
+  asked once a run per prefix and never cached, since it grows; then `page=`, with the
+  same `from`/`to`), each page recorded as it is stored. The month fails only when a
+  page still answers 504, or when the prefix has a single page and so nothing smaller
+  to ask; the next run resumes at the failed page. The page count is of the prefix's
+  index blocks whatever the month, so a split month of a prefix of N pages takes N
+  queries.
 - Progress is recorded in `archive_searches` (publisher, source, crawl or month, prefix,
   pages, pages done, captures, kept, months found, complete) as each page's captures are
   stored; an interrupted search resumes at its first page not done, and a complete one
-  is skipped. Publishers marked `deferred` (Ars Technica, five sections searched month by
+  is skipped. A search that fails every attempt stays incomplete, so the next run
+  searches only the failed and unsearched months; a search recorded over a span of
+  months ("2024-05..2026-09", from before searches were monthly) counts for each of its
+  months. For each publisher the run prints its Wayback months **done** (every search
+  of the month complete), **failed** (one left incomplete) and **left** (not searched
+  yet), before searching and in a table after. Publishers marked `deferred` (Ars Technica, five sections searched month by
   month) are searched and downloaded after every other publisher's search and downloads.
 
 **Why Common Crawl's search is off.** Measured from its cached answers on 2026-10-21,
@@ -466,7 +484,10 @@ and its slug (the last path segment, split on `-`, `_` and `.`):
 One capture per URL is kept in `archive_captures`: a successful HTML capture, from
 Common Crawl when it has one (a range request is cheaper than a page), else the
 earliest. Each round prints the URLs kept per publisher, per company and per year
-before downloading anything; `--dry-run` searches, prints them, and downloads nothing.
+once its searches are done, then downloads what is pending; `--dry-run` searches,
+prints them, and downloads nothing. While the round's Wayback searches are paused for a
+block (below), the captures it has found so far are downloaded meanwhile, so a long
+pause does not hold the downloads up.
 
 **Download.** Each article is fetched from its **live publisher URL** through the
 article-text rules (section 8): its User-Agent, robots.txt (kept on disk), one request a
@@ -496,11 +517,24 @@ first within each domain.
 **Polite client.** Every request carries `talk-is-cheap/<version> (research: reads
 archived news for executives' statements; contact: <EDGAR_IDENTITY>)`, and every
 answer is kept on disk under `NEWS_CACHE_DIR` (`news/http_cache.py`), so nothing is
-fetched twice. Common Crawl gets at most one request a second, the Wayback Machine one
-every three seconds; 429 and 5xx answers, dropped connections and answers that are not
-whole (a maintenance page sent with status 200, a page cut off mid-line) are retried
-after 5 seconds, doubling to 2 minutes, at most 8 times; then the search is left for the
-next run.
+fetched twice. Common Crawl gets at most one request a second; its 429 and 5xx answers,
+dropped connections and answers that are not whole (a maintenance page sent with status
+200, a page cut off mid-line) are retried after 5 seconds, doubling to 2 minutes, at
+most 8 times; then the search is left for the next run.
+
+The Wayback Machine is asked at the pace the Internet Archive asks clients to keep (the
+limits of the `wayback` library): a CDX search every 2.5 seconds (80% of 30 a minute),
+and up to 8 archived pages a second, read by a fetcher of their own. Each failure gets
+its own wait (`WAYBACK_RETRY`, `news/http_cache.py: RetryPolicy`), always at least the
+pace, and every wait is logged with its reason:
+
+| Answer | Wait |
+| --- | --- |
+| 503 (and 500, 502, an answer that is not whole) | retried at once, then after 2, 4 and 8 seconds; then the month is left for the next run |
+| 504 | not retried: the query is split (above) |
+| 429 | once, after Retry-After, or 60 seconds without it |
+| a connection timeout, or another dropped connection | retried at the normal pace, up to 4 times; then the month is left for the next run |
+| 3 connection timeouts in a row | taken for a block: searches pause, and one `limit=1` CDX query is sent each minute; the first one answered ends the pause, and searches go on at the normal pace. The pause's length is logged. Archived page reads and live publisher downloads are not paused: the round downloads the captures found so far while it lasts. |
 
 **Text use.** As for every article: extraction and grounding only; answers quote at most
 40 words and link to the publisher's URL.

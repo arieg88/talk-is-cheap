@@ -6,11 +6,15 @@ import sys
 from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from talk_is_cheap import __version__
 from talk_is_cheap.config import Settings, get_settings
 from talk_is_cheap.db import create_engine, create_session_factory
 from talk_is_cheap.universe import Universe, load_universe
+
+if TYPE_CHECKING:
+    from talk_is_cheap.news.archives import MonthProgress
 
 # Wayback searches cover the months that ended at least this long ago: the archive is
 # still adding captures of later days, which RSS polling and Finnhub cover.
@@ -49,6 +53,9 @@ async def archives_command(
         COMMON_CRAWL,
         WAYBACK,
         WAYBACK_INTERVAL,
+        WAYBACK_PAGE_INTERVAL,
+        WAYBACK_PROBE,
+        WAYBACK_RETRY,
         ArchiveError,
         crawls,
     )
@@ -56,6 +63,7 @@ async def archives_command(
         ArchivePublisher,
         Download,
         DownloadSummary,
+        MonthProgress,
         SearchResult,
         SearchUnit,
         SlugFilter,
@@ -66,10 +74,12 @@ async def archives_command(
         download,
         load_archives_file,
         month_end,
+        month_progress,
         months,
         pending,
         record_empty,
         run_search,
+        search_states,
         searched,
         wayback_units,
     )
@@ -139,9 +149,26 @@ async def archives_command(
                 cc = PoliteFetcher(
                     client, cache, COMMON_CRAWL, interval=CC_INTERVAL, on_attempt=attempt
                 )
+
+                def waited(reason: str, url: str) -> None:
+                    print(f"{_stamp()}   wayback: {reason}  {url[:100]}", flush=True)
+
+                # CDX searches, paused while the archive blocks us; archived pages are read
+                # by a fetcher of their own, which never pauses, so downloads go on.
                 wayback = PoliteFetcher(
-                    client, cache, WAYBACK, interval=WAYBACK_INTERVAL, on_attempt=attempt
+                    client,
+                    cache,
+                    WAYBACK,
+                    interval=WAYBACK_INTERVAL,
+                    on_attempt=attempt,
+                    policy=WAYBACK_RETRY,
+                    on_wait=waited,
+                    probe=WAYBACK_PROBE,
                 )
+                wayback_pages = PoliteFetcher(
+                    client, cache, WAYBACK, interval=WAYBACK_PAGE_INTERVAL,
+                    on_attempt=attempt, policy=WAYBACK_RETRY, on_wait=waited,
+                )  # fmt: skip
                 try:
                     found_crawls = await crawls(cc, start, today)
                 except (ServiceUnavailable, ArchiveError) as exc:
@@ -156,6 +183,10 @@ async def archives_command(
                 # Common Crawl and the Wayback Machine are searched at the same time: a
                 # publisher's Wayback months are known once its Common Crawl pass is done.
                 failures: list[str] = []
+                # Index pages of each Wayback section, asked once a run.
+                page_counts: dict[str, int] = {}
+                # Each publisher's Wayback months after its searches.
+                progress: dict[str, MonthProgress] = {}
 
                 def page_line(unit: SearchUnit, done: int, pages: int, r: SearchResult) -> None:
                     if pages > 1:
@@ -165,11 +196,19 @@ async def archives_command(
                             flush=True,
                         )
 
+                def split_line(unit: SearchUnit, why: str) -> None:
+                    print(
+                        f"{_stamp()}   {unit.publisher.key} {unit.period} "
+                        f"{unit.prefix[:50]}: {why}",
+                        flush=True,
+                    )
+
                 async def run(fetcher: PoliteFetcher, units: list[SearchUnit]) -> None:
                     for unit in units:
                         result = await run_search(
-                            sessions, fetcher, unit, slugs, start, on_page=page_line
-                        )
+                            sessions, fetcher, unit, slugs, start, on_page=page_line,
+                            on_split=split_line, page_counts=page_counts,
+                        )  # fmt: skip
                         if result.error is not None:
                             failures.append(unit.prefix)
                         searched_line(result)
@@ -222,23 +261,24 @@ async def archives_command(
                     while (publisher := await ready.get()) is not None:
                         async with sessions() as session:
                             covered = await covered_months(session, publisher.key)
-                            done = await searched(session, publisher.key, WAYBACK)
+                            states = await search_states(session, publisher.key, WAYBACK)
                         every = [
                             m for m in months(start, today) if month_end(m) <= today - SETTLE_TIME
                         ]
                         missing = [m for m in every if m not in covered]
-                        units = [
-                            u
-                            for u in wayback_units(publisher, missing, slugs.company_terms)
-                            if (u.period, u.prefix) not in done
-                        ]
+                        needed = wayback_units(publisher, missing, slugs.company_terms)
+                        units = [u for u in needed if not states.get((u.period, u.prefix))]
+                        before = month_progress(needed, states)
                         print(
                             f"{_stamp()} {publisher.key}: Common Crawl holds articles for "
-                            f"{len(every) - len(missing)} of {len(every)} months; "
-                            f"{len(units)} Wayback searches to run ({len(done)} done before)",
+                            f"{len(every) - len(missing)} of {len(every)} months; Wayback "
+                            f"months: {_months(before)}; {len(units)} searches to run",
                             flush=True,
                         )
                         await run(wayback, units)
+                        async with sessions() as session:
+                            states = await search_states(session, publisher.key, WAYBACK)
+                        progress[publisher.key] = month_progress(needed, states)
 
                 def downloaded(d: Download) -> None:
                     size = f", {d.text_chars:,} chars from {d.text_source}" if d.text_chars else ""
@@ -266,12 +306,65 @@ async def archives_command(
                 )  # fmt: skip
                 matcher = CompanyMatcher([c for c in universe.companies if c.name])
                 summaries: list[DownloadSummary] = []
+                archive_copies = {COMMON_CRAWL: cc, WAYBACK: wayback_pages}
+                by_key = {p.key: p for p in config.publishers}
+
+                async def download_pending(keys: list[str], most: int | None, when: str) -> int:
+                    """Download the round's pending captures (at most `most`); how many."""
+                    async with sessions() as session:
+                        queue = await pending(session, keys, wanted, start, most)
+                    if not queue and when:
+                        return 0
+                    print(
+                        f"{_stamp()} downloading {len(queue)} articles{when} from their live "
+                        "publisher pages (robots.txt, one request a second per domain, domains "
+                        "in parallel); the archive copy only where the live page is gone",
+                        flush=True,
+                    )
+                    summaries.append(
+                        await download(
+                            sessions,
+                            rules,
+                            archive_copies,
+                            queue,
+                            by_key,
+                            matcher,
+                            start,
+                            on_result=downloaded,
+                        )
+                    )
+                    return len(queue)
+
+                async def while_paused(keys: list[str], searching: asyncio.Event) -> int:
+                    """Download what the round has found whenever its Wayback searches are
+                    paused for a block, until the searches end; how many were started."""
+                    started = 0
+                    while True:
+                        if not await _first(wayback.blocked, searching):
+                            return started
+                        most = None if limit is None else limit - started
+                        if most is None or most > 0:
+                            started += await download_pending(
+                                keys, most, " while Wayback searches are paused"
+                            )
+                        if not await _first(wayback.unblocked, searching):
+                            return started
+
                 for group in rounds:
                     if not group:
                         continue
-                    ready: asyncio.Queue[ArchivePublisher | None] = asyncio.Queue()
-                    await asyncio.gather(common_crawl(group, ready), wayback_machine(ready))
                     keys = [p.key for p in group]
+                    ready: asyncio.Queue[ArchivePublisher | None] = asyncio.Queue()
+                    searching = asyncio.Event()  # set when the round's searches are over
+                    early = None
+                    if not dry:
+                        early = asyncio.ensure_future(while_paused(keys, searching))
+                    try:
+                        await asyncio.gather(common_crawl(group, ready), wayback_machine(ready))
+                    finally:
+                        searching.set()
+                    started = await early if early is not None else 0
+                    _print_progress({p.key: progress[p.key] for p in group if p.key in progress})
                     async with sessions() as session:
                         counts = await capture_counts(session, keys, wanted, start)
                     _print_counts(counts.by_publisher, "PUBLISHER")
@@ -284,29 +377,14 @@ async def archives_command(
                     )
                     if dry:
                         continue
-                    async with sessions() as session:
-                        queue = await pending(session, keys, wanted, start, limit)
-                    print(
-                        f"{_stamp()} downloading {len(queue)} articles from their live publisher "
-                        "pages (robots.txt, one request a second per domain, domains in "
-                        "parallel); the archive copy only where the live page is gone",
-                        flush=True,
-                    )
-                    summaries.append(
-                        await download(
-                            sessions,
-                            rules,
-                            {COMMON_CRAWL: cc, WAYBACK: wayback},
-                            queue,
-                            {p.key: p for p in config.publishers},
-                            matcher,
-                            start,
-                            on_result=downloaded,
-                        )
-                    )
+                    rest = None if limit is None else max(limit - started, 0)
+                    if rest != 0:
+                        await download_pending(keys, rest, "")
                 if failures:
+                    failed = sum(m.failed for m in progress.values())
                     print(
-                        f"{len(failures)} searches failed and are left for the next run",
+                        f"{len(failures)} searches failed ({failed} Wayback months); the next "
+                        "run searches only the failed and unsearched months",
                         file=sys.stderr,
                     )
                 if dry:
@@ -329,6 +407,28 @@ async def archives_command(
         f"{sum(s.seconds for s in summaries):.0f}s"
     )
     return 0
+
+
+async def _first(wanted: asyncio.Event, over: asyncio.Event) -> bool:
+    """Wait for `wanted` or `over`; whether `wanted` came first (and `over` is not set)."""
+    waits = [asyncio.ensure_future(e.wait()) for e in (wanted, over)]
+    await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+    for task in waits:
+        task.cancel()
+    return wanted.is_set() and not over.is_set()
+
+
+def _months(found: "MonthProgress") -> str:
+    return f"{found.done} done, {found.failed} failed, {found.left} left of {found.months}"
+
+
+def _print_progress(rows: "dict[str, MonthProgress]") -> None:
+    """Each publisher's Wayback months after the searches."""
+    if not rows:
+        return
+    print(f"\n{'WAYBACK MONTHS':<16}{'DONE':>6}{'FAILED':>8}{'LEFT':>6}{'OF':>5}")
+    for key, found in rows.items():
+        print(f"{key:<16}{found.done:>6}{found.failed:>8}{found.left:>6}{found.months:>5}")
 
 
 def _print_counts(rows: "dict[str, Counter[int]]", label: str) -> None:

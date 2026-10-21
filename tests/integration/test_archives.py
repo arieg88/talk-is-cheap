@@ -26,7 +26,7 @@ from talk_is_cheap.db.models import (
     Feed,
 )
 from talk_is_cheap.news import article_text
-from talk_is_cheap.news.archive_index import CC_INDEX_URL, WAYBACK_CDX_URL
+from talk_is_cheap.news.archive_index import CC_INDEX_URL, WAYBACK_CDX_URL, WAYBACK_RETRY
 from talk_is_cheap.news.archives import (
     ArchivePattern,
     ArchivePublisher,
@@ -35,9 +35,12 @@ from talk_is_cheap.news.archives import (
     capture_counts,
     covered_months,
     download,
+    month_progress,
     pending,
     run_search,
+    search_states,
     searched,
+    wayback_units,
 )
 from talk_is_cheap.news.article_text import HostRules
 from talk_is_cheap.news.finnhub import (
@@ -246,6 +249,119 @@ async def test_archived_articles_are_searched_filtered_downloaded_and_linked(
                 since,
             )
     assert (again.kept, again.already_stored) == (0, 1)
+
+
+SECTION = ArchivePublisher(
+    key="archivetest",
+    publisher="Archive Test News",
+    domain=DOMAIN,
+    patterns=[ArchivePattern(path="/news/", article=r"^/news/\d+/[a-z0-9-]+/?$")],
+)
+
+
+def wayback_fetcher(client: httpx.AsyncClient, tmp_path: Path) -> PoliteFetcher:
+    return PoliteFetcher(client, tmp_path, "wayback", interval=0.0, policy=WAYBACK_RETRY,
+                         sleep=_no_sleep)  # fmt: skip
+
+
+async def test_a_month_answered_with_504_is_read_by_pages_and_fails_only_on_a_504_page(
+    sessions: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    month = date(2024, 5, 1)
+    [unit] = wayback_units(SECTION, [month], SLUGS.company_terms)
+    url = f"https://{DOMAIN}/news/1001/archivo-ceo-says-sales-will-double"
+    header = ["timestamp", "original"]
+    counts: dict[str, int] = {}
+    split: list[str] = []
+    with respx.mock(assert_all_called=False) as router:
+        pages = router.get(url__startswith=WAYBACK_CDX_URL, params={"showNumPages": "true"})
+        pages.respond(200, text="2")
+        first = router.get(url__startswith=WAYBACK_CDX_URL, params={"page": "0"}).respond(
+            200, json=[header, ["20240510000000", url]]
+        )
+        second = router.get(url__startswith=WAYBACK_CDX_URL, params={"page": "1"}).mock(
+            side_effect=[httpx.Response(504), httpx.Response(200, json=[header])]
+        )
+        whole = router.get(url__startswith=WAYBACK_CDX_URL).respond(504)  # the whole month
+        async with httpx.AsyncClient() as client:
+            wayback = wayback_fetcher(client, tmp_path)
+            failed = await run_search(
+                sessions, wayback, unit, SLUGS, date(2024, 1, 1), page_counts=counts,
+                on_split=lambda u, why: split.append(why),
+            )  # fmt: skip
+            # One 504 for the month, then its pages at once; page 1's 504 fails it.
+            assert whole.call_count == 1 and first.call_count == 1 and second.call_count == 1
+            assert split == ["HTTP 504 for the month: reading its 2 index pages"]
+            assert failed.error is not None and "504" in failed.error and failed.kept == 1
+            query = first.calls.last.request.url.params
+            assert (query["from"], query["to"]) == ("202405", "202405")
+            async with sessions() as session:
+                states = await search_states(session, "archivetest", "wayback")
+                row = await session.scalar(
+                    select(ArchiveSearch).where(ArchiveSearch.publisher == "archivetest")
+                )
+            assert states == {("2024-05", f"{DOMAIN}/news/"): False}
+            assert row is not None and (row.pages, row.pages_done, row.complete) == (2, 1, False)
+            assert month_progress([unit], states).failed == 1
+
+            # The next run asks only for the page that failed.
+            again = await run_search(
+                sessions, wayback, unit, SLUGS, date(2024, 1, 1), page_counts=counts
+            )
+    assert again.error is None and whole.call_count == 1 and first.call_count == 1
+    assert second.call_count == 2 and pages.call_count == 1
+    async with sessions() as session:
+        states = await search_states(session, "archivetest", "wayback")
+        kept = await session.scalar(
+            select(func.count())
+            .select_from(ArchiveCapture)
+            .where(ArchiveCapture.publisher == "archivetest")
+        )
+    assert month_progress([unit], states).done == 1 and kept == 1
+
+
+async def test_a_month_of_one_index_page_answered_with_504_fails(
+    sessions: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    [unit] = wayback_units(SECTION, [date(2024, 6, 1)], SLUGS.company_terms)
+    with respx.mock() as router:
+        router.get(url__startswith=WAYBACK_CDX_URL, params={"showNumPages": "true"}).respond(
+            200, text="1"
+        )
+        whole = router.get(url__startswith=WAYBACK_CDX_URL).respond(504)
+        async with httpx.AsyncClient() as client:
+            result = await run_search(
+                sessions, wayback_fetcher(client, tmp_path), unit, SLUGS, date(2024, 1, 1)
+            )
+    assert whole.call_count == 1  # never asked again
+    assert result.error is not None and "nothing smaller to ask" in result.error
+    async with sessions() as session:
+        assert await search_states(session, "archivetest", "wayback") == {
+            ("2024-06", f"{DOMAIN}/news/"): False
+        }
+
+
+async def test_a_search_over_a_span_of_months_counts_for_each_of_them(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    def search(period: str, prefix: str, complete: bool) -> ArchiveSearch:
+        return ArchiveSearch(
+            publisher="archivetest", source="wayback", period=period, prefix=prefix,
+            requests=1, captures=0, kept=0, months=[], complete=complete,
+        )  # fmt: skip
+
+    async with sessions() as session, session.begin():
+        session.add_all([
+            search("2024-03..2024-05", f"{DOMAIN}/archivo", True),  # done before, as a span
+            search("2024-03..2024-05", f"{DOMAIN}/news/", False),  # a span that failed
+            search("2024-04", f"{DOMAIN}/news/", True),  # its month, done since
+        ])  # fmt: skip
+    async with sessions() as session:
+        states = await search_states(session, "archivetest", "wayback")
+        done = await searched(session, "archivetest", "wayback")
+    assert states[("2024-03", f"{DOMAIN}/news/")] is False
+    assert states[("2024-04", f"{DOMAIN}/news/")] is True  # a complete search wins
+    assert {("2024-03", f"{DOMAIN}/archivo"), ("2024-05", f"{DOMAIN}/archivo")} <= done
 
 
 async def test_a_google_news_story_matched_on_finnhub_is_fetched_from_its_publisher(
@@ -582,6 +698,86 @@ async def test_ingest_archives_searches_then_downloads_from_the_cli(
             assert await asyncio.to_thread(main, ["ingest", "archives"]) == 0
             out = capsys.readouterr().out
         assert "downloading 1 articles from their live publisher pages" in out
+        table = out.split("WAYBACK MONTHS")[1].splitlines()[1].split()
+        assert table[0] == "archivetest" and table[2:4] == ["0", "0"]  # none failed or left
         assert "archivetest" in out.split("PUBLISHER")[-1]
     finally:
         get_settings.cache_clear()
+
+
+async def test_a_rounds_downloads_start_while_its_wayback_searches_are_paused(
+    sessions: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import asyncio
+
+    import yaml
+
+    from talk_is_cheap.cli import main
+    from talk_is_cheap.config import get_settings
+    from talk_is_cheap.news import archive_index
+    from talk_is_cheap.news.http_cache import RetryPolicy
+
+    universe = tmp_path / "universe.yaml"
+    universe.write_text(yaml.safe_dump({
+        "history_start": "2024-05-01", "forms": ["10-Q"],
+        "companies": [COMPANY.model_dump(mode="json")],
+    }))  # fmt: skip
+    archives = tmp_path / "archives.yaml"
+    archives.write_text(yaml.safe_dump({
+        "claim_words": ["says", "will"],
+        "publishers": [PUBLISHER.model_dump() | {"common_crawl": False}],
+    }))  # fmt: skip
+    for name, value in {
+        "UNIVERSE_FILE": str(universe), "ARCHIVES_FILE": str(archives),
+        "NEWS_CACHE_DIR": str(tmp_path / "cache"), "EDGAR_IDENTITY": "Test Person t@example.com",
+    }.items():  # fmt: skip
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+    monkeypatch.setattr(archive_index, "WAYBACK_INTERVAL", 0.0)
+    monkeypatch.setattr(archive_index, "WAYBACK_RETRY", RetryPolicy(probe_every=0.01))
+    url = f"https://{DOMAIN}{ARTICLE_PATH}"
+    header = ["timestamp", "original"]
+    order: list[str] = []
+
+    def cdx(request: httpx.Request) -> httpx.Response:
+        query = str(request.url)
+        if request.url.params.get("limit") == "1":  # the probe
+            order.append("probe")
+            return httpx.Response(200 if "live page" in order else 503, json=[header])
+        if "2024%2F05" in query:
+            return httpx.Response(200, json=[header, ["20240523000000", url]])
+        if "2024%2F06" in query and "live page" not in order:
+            order.append("June: timeout")
+            raise httpx.ConnectTimeout("no answer")
+        return httpx.Response(200, json=[header])
+
+    def live(request: httpx.Request) -> httpx.Response:
+        order.append("live page")
+        # Text of its own: the other tests store this page's text for the same URL.
+        return httpx.Response(200, html=PAGE.replace("Archivo expects", "Archivo, paused, expects"))
+
+    try:
+        with respx.mock(assert_all_called=False) as router:
+            router.get("https://index.commoncrawl.org/collinfo.json").respond(200, json=[])
+            router.get(url__startswith=WAYBACK_CDX_URL).mock(side_effect=cdx)
+            router.get(f"https://{DOMAIN}/robots.txt").respond(404)
+            router.get(url).mock(side_effect=live)
+            assert await asyncio.to_thread(main, ["ingest", "archives"]) == 0
+            out = capsys.readouterr().out
+    finally:
+        get_settings.cache_clear()
+    # Three timeouts pause the searches; the article May found is read meanwhile; the
+    # next probe is answered and June is searched again.
+    assert order[:3] == ["June: timeout"] * 3
+    paused = order[3:]
+    read = paused.index("live page")
+    assert set(paused[:read]) <= {"probe"}  # unanswered probes while the page is read
+    assert paused[read + 1 :] == ["probe"]  # the first probe after it is answered
+    assert "downloading 1 articles while Wayback searches are paused" in out
+    assert "taken for a block" in out and "pause over after" in out
+    assert "downloading 0 articles from their live publisher pages" in out
+    table = out.split("WAYBACK MONTHS")[1].splitlines()[1].split()
+    assert table[2:4] == ["0", "0"]  # June done after the pause: none failed or left
