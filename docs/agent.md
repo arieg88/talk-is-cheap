@@ -37,6 +37,15 @@ by citation id), `draft`, `verifier_feedback`, `revision_count`, `failures` (eac
 check that caught it), `tool_calls`, `usage` (calls, cached calls, tokens and cost per
 node), and the `final` answer with its `sources`.
 
+The graph is built with its dependencies (`AgentDeps`: the model, response cache,
+budget, tool context and today's date), and a run can pass its own as LangGraph's run
+`context`: the HTTP API compiles the graph once and gives each request its own budget,
+evidence log and tool log ([api.md](api.md)). A tool call can have a time limit
+(`ToolContext.tool_timeout_seconds`, the API's `TOOL_TIMEOUT_SECONDS`): one that runs
+longer is stopped and returns an `error` the model reads ("timed out after 10 seconds;
+try a narrower query or another tool"), like any tool failure, and the run goes on. `ask`
+sets none.
+
 1. **Router** (`agent/router.py`). Rules first, the model only when they cannot decide:
    - advice ("should I buy", "price target", "good investment") and predictions ("will
      the stock", "will Meta beat") are `out_of_scope`, marked as about trading;

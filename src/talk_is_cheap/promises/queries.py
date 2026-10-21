@@ -48,9 +48,10 @@ async def promise_rows(
     due_before: date | None = None,
     due_after: date | None = None,
     specificity: Sequence[str] | None = None,
+    scheduled: bool = True,
 ) -> list[PromiseRow]:
     """Current promises, newest statement first (every company's when `ticker` is
-    None)."""
+    None). `scheduled`: include scheduled actions (splits, dividends on a fixed date)."""
     statement = (
         select(Promise, PromiseVerdict, PromiseReview, ARTICLE_PUBLISHER, ARTICLE_LINK)
         .join(Article, Article.id == Promise.article_id)
@@ -69,6 +70,8 @@ async def promise_rows(
         statement = statement.where(Promise.due_date >= due_after)
     if specificity:
         statement = statement.where(Promise.specificity.in_(list(specificity)))
+    if not scheduled:
+        statement = statement.where(Promise.claim_type != "scheduled_action")
     wanted = normalize_name(speaker) if speaker else None
     rows = []
     for promise, verdict, review, publisher, url in (await session.execute(statement)).all():

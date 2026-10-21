@@ -5,10 +5,10 @@ from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
@@ -99,6 +99,24 @@ class Settings(BaseSettings):
     # days, that many days after the due date.
     promise_grace_days: int | None = Field(default=None, ge=0, le=730)
 
+    # HTTP API (`talk-is-cheap serve`). Clients send one of these keys in X-API-Key;
+    # comma-separated. Without any, the API refuses to start in production and lets every
+    # request in locally and in tests.
+    api_keys: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
+    # Requests per minute and key: chat questions, and every other request.
+    rate_limit_chat_per_minute: int = Field(default=20, ge=1)
+    rate_limit_per_minute: int = Field(default=120, ge=1)
+    # What chat questions may spend per UTC day: each key, and all keys together. On top
+    # of LLM_BUDGET_USD.
+    daily_llm_budget_usd: Decimal = Field(default=Decimal("0.25"), ge=0)
+    daily_llm_budget_total_usd: Decimal = Field(default=Decimal("1.00"), ge=0)
+    # Origins a browser UI may call the API from; comma-separated.
+    cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # A chat question stops with an error after this long. A tool call that takes longer
+    # than its limit returns an error to the model, and the question goes on.
+    chat_timeout_seconds: float = Field(default=60, gt=0)
+    tool_timeout_seconds: float = Field(default=10, gt=0)
+
     @field_validator("database_url")
     @classmethod
     def _require_psycopg_driver(cls, value: str) -> str:
@@ -111,6 +129,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "llm_api_key",
+        "anthropic_api_key",
         "finnhub_api_key",
         "llm_effort",
         "llm_input_price",
@@ -121,6 +140,13 @@ class Settings(BaseSettings):
     @classmethod
     def _empty_is_unset(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("api_keys", "cors_origins", mode="before")
+    @classmethod
+    def _comma_separated(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @model_validator(mode="after")
     def _anthropic_key_as_llm_key(self) -> "Settings":

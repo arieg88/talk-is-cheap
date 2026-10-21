@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install db db-down db-reset migrate db-check ingest index extract refresh-claims eval-retrieval eval-guidance eval-statements eval-promises smoke-agent agent-graph lint format typecheck test test-unit check
+.PHONY: help install db db-down db-reset migrate db-check ingest index extract refresh-claims eval-retrieval eval-guidance eval-statements eval-promises smoke-agent agent-graph api lint format typecheck test test-unit check
 
 help: ## List available commands
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -62,6 +62,12 @@ smoke-agent: ## Run the agent's smoke set (evals/agent/smoke.jsonl): estimate, s
 
 agent-graph: ## Write the agent's graph as Mermaid to docs/agent-graph.md
 	uv run talk-is-cheap agent-graph
+
+API_HOST ?= 127.0.0.1
+API_PORT ?= 8080
+
+api: ## Run the HTTP API on API_HOST:API_PORT (127.0.0.1:8080), reloading on code changes; docs at /docs
+	uv run talk-is-cheap serve --host $(API_HOST) --port $(API_PORT) --reload
 
 lint: ## Check lint and formatting
 	uv run ruff check .

@@ -167,10 +167,11 @@ The SEC requires every automated request to identify a person or organization wi
 | `talk-is-cheap guidance review ID --ok\|--wrong` | Record a review decision on a row: `--ok` clears its plausibility flag, `--wrong` leaves it out of verdicts. Kept by filing and statement, so it survives re-extraction and re-processing. |
 | `talk-is-cheap ask "question" [--thread ID] [--model M] [--show-trace] [--max-cost 0.05]` | Answer a question with citations, then one line: tool calls, tokens, cost, seconds, revisions (and the checks that failed), and whether the answer came from the cache. Prints the estimate and the budget left first. `--thread` continues a conversation ("And the quarter before?"); the thread id is printed. `--show-trace` prints each node and tool call with its arguments and a truncated result. Without a question: an interactive chat on one thread, until an empty line. Every run is logged to `agent_runs`. |
 | `talk-is-cheap agent-graph [--output docs/agent-graph.md]` | Write the agent's graph as Mermaid |
+| `talk-is-cheap serve [--host 127.0.0.1] [--port 8080] [--reload]` | The HTTP API: streaming chat over the agent, and promises, track records, guidance, financials and coverage as JSON, with API keys, rate limits and daily LLM budgets. OpenAPI docs at `/docs`; everything in [docs/api.md](docs/api.md). Refuses to start in production without `API_KEYS`. |
 | `talk-is-cheap eval agent [--dry-run] [--only ID,ID] [--model M] [--max-cost 0.30]` | The agent's smoke set: prints the estimate, runs each question on its own thread, scores facts, citations, grounding and refusals, prints a table and the total cost, and writes `evals/agent/results/<timestamp>.json`. `--dry-run` uses a scripted model and spends nothing. |
 | `talk-is-cheap eval guidance [--models claude-haiku-5-5,claude-opus-5-5] [--details]` | Precision, recall and F1 (all, numeric and qualitative items), exact figures, period accuracy, conditions captured, and tokens and cost per document, on `evals/guidance/labels.jsonl`. Responses are cached, so re-running costs nothing. |
 
-Run `make` with no arguments to list the `make` shortcuts. `make refresh-claims` chains `extract statements --missing-only --max-stories 500`, `promises frame --missing-only` and `promises resolve --due-only` with `--check-budget`, so it stops before a paid stage whose estimate exceeds the budget left; run it after every news ingest (`MAX_STORIES=200 make refresh-claims` for fewer stories). `make ingest` runs `ingest edgar`, `ingest filings`, `index` and, when an LLM key is configured, `extract guidance`. `make index` indexes new filing text and news; `make extract` extracts new guidance and refreshes verdicts; `make eval-retrieval`, `make eval-guidance` and `make eval-statements` and `make eval-promises` run the benchmarks (`ARGS=--dry-run` prints the calls and cost); `make smoke-agent` runs the agent's smoke set (`make smoke-agent ARGS=--dry-run` at no cost) and `make agent-graph` redraws `docs/agent-graph.md`.
+Run `make` with no arguments to list the `make` shortcuts. `make refresh-claims` chains `extract statements --missing-only --max-stories 500`, `promises frame --missing-only` and `promises resolve --due-only` with `--check-budget`, so it stops before a paid stage whose estimate exceeds the budget left; run it after every news ingest (`MAX_STORIES=200 make refresh-claims` for fewer stories). `make ingest` runs `ingest edgar`, `ingest filings`, `index` and, when an LLM key is configured, `extract guidance`. `make index` indexes new filing text and news; `make extract` extracts new guidance and refreshes verdicts; `make eval-retrieval`, `make eval-guidance` and `make eval-statements` and `make eval-promises` run the benchmarks (`ARGS=--dry-run` prints the calls and cost); `make smoke-agent` runs the agent's smoke set (`make smoke-agent ARGS=--dry-run` at no cost) and `make agent-graph` redraws `docs/agent-graph.md`. `make api` serves the API on `127.0.0.1:8080` with reload (`LLM_PROVIDER=fake make api` answers with the free scripted model). `docker compose up --build` starts the database, applies the migrations and serves the API on port 8080 (`API_PORT`); the same image runs any command (`docker compose run --rm api talk-is-cheap ingest news`).
 
 ## Adding companies or history
 
@@ -290,7 +291,7 @@ All settings are environment variables. See `.env.example`.
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model for search embeddings. Changing it re-embeds everything on the next `index`. |
 | `RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | fastembed cross-encoder for `--mode rerank` |
 | `MODEL_CACHE_DIR` | `.cache/fastembed` | Where the models are downloaded |
-| `LLM_PROVIDER` | `anthropic` | LangChain chat-model integration for guidance extraction and the agent: `anthropic`, `openai` or `google_genai` (the last two need their `langchain-*` package) |
+| `LLM_PROVIDER` | `anthropic` | LangChain chat-model integration for guidance extraction and the agent: `anthropic`, `openai` or `google_genai` (the last two need their `langchain-*` package). For the API only, `fake`: a scripted model that answers every question with the named company's latest revenue, at no cost (not allowed in production) |
 | `LLM_MODEL` | `claude-haiku-5-5` | Model for guidance and statement extraction and every node of the agent, the default for cost; `--model claude-opus-5-5` is more accurate ([docs/guidance.md](docs/guidance.md)) |
 | `LLM_EFFORT` | `low` | Anthropic reasoning effort; empty for the model's default. Part of the model name in the cache and stored rows (`claude-opus-5-5@low`). |
 | `LLM_API_KEY` | unset | API key of the provider; `ANTHROPIC_API_KEY` is used when it is empty. Keep it in `.env`, never in the repository. |
@@ -303,7 +304,14 @@ All settings are environment variables. See `.env.example`.
 | `TEST_DATABASE_URL` | `talkischeap_test` on the local Docker server | Database the tests drop and recreate; the name must end in `_test`. Read from the shell only, not from `.env`. |
 | `DATABASE_ECHO` | `false` | Log every SQL statement |
 | `DATABASE_POOL_SIZE` | `5` | Connection pool size, 1 to 50 |
-| `ENVIRONMENT` | `local` | `local`, `test` or `production` |
+| `ENVIRONMENT` | `local` | `local`, `test` or `production`. In production the API needs `API_KEYS` and logs JSON. |
+| `API_KEYS` | unset | Comma-separated keys API clients send in `X-API-Key`. Unset: every request is let in, in `local` and `test` only. Keep them in `.env`. |
+| `RATE_LIMIT_CHAT_PER_MINUTE` | `20` | Chat questions per key per minute; over it, 429 with `Retry-After` |
+| `RATE_LIMIT_PER_MINUTE` | `120` | Every other API request, per key per minute |
+| `DAILY_LLM_BUDGET_USD` | `0.25` | What one API key's chat questions may spend per UTC day, on top of `LLM_BUDGET_USD` |
+| `DAILY_LLM_BUDGET_TOTAL_USD` | `1.00` | What all keys' chat questions together may spend per UTC day |
+| `CORS_ORIGINS` | unset | Comma-separated origins a browser UI may call the API from |
+| `CHAT_TIMEOUT_SECONDS`, `TOOL_TIMEOUT_SECONDS` | `60`, `10` | A chat question that takes longer stops with an `error` event; a tool call that takes longer returns an error to the model, and the question goes on |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 
 ## Data model
@@ -328,7 +336,7 @@ All settings are environment variables. See `.env.example`.
 | `guidance_extractions` | One per document whose outlook was extracted: model, prompt version, post-processing version, hash of the prompt, the grounded items (JSON), the items dropped and why, tokens and cost |
 | `guidance` | One row per guidance statement per earnings filing: metric (and the company's words), segment, basis, measure (level, year-over-year or sequential growth, share of revenue), constant currency, target period as written and resolved, low, high, point, plus-or-minus, unit, qualitative text, conditions, model and prompt version; and its verdict (`beat`, `met`, `missed`, `pending`, `not_comparable`) with the reason, whether the basis was assumed GAAP, the plausibility check (`passed`, `flagged`, `skipped`, its rule and numbers), the review decision, an item key that identifies the statement across rebuilds, the actual as first reported, the difference and percent difference, and the filing the actual came from |
 | `guidance_sources` | Where each statement is written: accession number, document, URL, section and character range, with the quoted text |
-| `llm_spend` | One row per paid LLM call: time, command, model, prompt version, tokens and cost, counted toward `LLM_BUDGET_USD`; and notes of earlier spending, not counted |
+| `llm_spend` | One row per paid LLM call: time, command, model, prompt version, tokens and cost, counted toward `LLM_BUDGET_USD`, and for API chat the id of the key it was asked with; and notes of earlier spending, not counted |
 | `guidance_reviews` | Review decisions (`ok`, `wrong`) by filing accession number and the statement's item key, with what was reviewed |
 | `article_texts` | The text of one article per linked story, for statement extraction: `ok` with the text and its content hash, or `unavailable` with the reason (robots.txt, HTTP status, no article text) |
 | `statement_extractions` | One per story and company extracted: model, prompt and post-processing version, hash of the prompt, the grounded claims (JSON), the claims dropped and why, tokens and cost |
@@ -341,6 +349,8 @@ All settings are environment variables. See `.env.example`.
 | `promise_reviews` | Reviewers' verdicts, by the claim's hash |
 | `agent_runs` | One row per question `ask` or `eval agent` answered: question, thread, prompt version of each node, model, question type, tool calls (name, arguments, seconds, evidence ids, error), model calls and how many came from the cache, tokens, cost, seconds, revisions, verifier failures by check, whether the answer was verified, the answer |
 | `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations` | The agent's conversations by thread, LangGraph's Postgres checkpointer schema (created by migration 0009) |
+| `request_log` | One row per API request (not health checks or docs): request id, time, method, path, status, latency, API key id (never the key); for chat, how it ended (`completed`, `timeout`, `disconnected`, ...), the thread, the `agent_runs` row, model, tokens, cost and tool calls |
+| `feedback` | Thumbs up or down on a chat answer by its request id, with an optional comment and the key id |
 
 ## Project layout
 
@@ -378,6 +388,15 @@ talk-is-cheap/
 │   │   ├── search.py        # filters, keyword, vector, hybrid (RRF) and rerank search
 │   │   └── evaluate.py      # retrieval benchmark: recall@k and MRR
 │   ├── spend.py             # LLM spending ledger and budget
+│   ├── companies.py         # what is stored per company (the API's coverage list)
+│   ├── api/
+│   │   ├── app.py           # create_app(settings): lifespan, pool, checkpointer, graph compiled once
+│   │   ├── chat.py          # POST /v1/chat: SSE events, timeouts, budgets, stopped runs
+│   │   ├── routes.py        # health checks and the data endpoints, pagination
+│   │   ├── schemas.py       # request, response and stream-event models
+│   │   ├── security.py      # API keys, rate limits
+│   │   ├── observability.py # request ids, structlog, the request log
+│   │   └── server.py        # talk-is-cheap serve (uvicorn)
 │   ├── sources.py           # what each news source contributes (sources --report)
 │   ├── agent/
 │   │   ├── tools.py         # the agent's tools over financials, guidance, statements, search, SQL
@@ -390,6 +409,7 @@ talk-is-cheap/
 │   │   ├── memory.py        # Postgres checkpointer
 │   │   ├── run.py           # one question on a thread; agent_runs log
 │   │   ├── commands.py      # ask, agent-graph
+│   │   ├── fake.py          # LLM_PROVIDER=fake: a scripted model at no cost
 │   │   └── smoke.py         # smoke set: scoring, dry-run script
 │   ├── prompts/agent/       # versioned node prompts (router/v1.md, ... answer/v1.md)
 │   ├── guidance/
@@ -449,7 +469,7 @@ talk-is-cheap/
 │   │   ├── metrics.yaml     # metrics and their XBRL concepts
 │   │   └── ingest.py        # load and store, per company
 │   └── db/
-│       ├── models.py        # filings, financials, documents, news, guidance, statements, agent runs
+│       ├── models.py        # filings, financials, documents, news, guidance, statements, agent runs, API log
 │       ├── base.py, session.py, health.py
 ├── scripts/poll-news.sh     # one scheduled news poll, with log and overlap guard
 ├── alembic/                 # migrations
@@ -460,7 +480,9 @@ talk-is-cheap/
 ├── evals/agent/             # agent smoke and news questions; results/ holds scored runs
 ├── tests/                   # unit tests; integration/ uses a real database
 │   └── fixtures/            # trimmed real SEC filings; news/ holds trimmed real feeds
-├── docker-compose.yml
+├── docs/                    # how each part works; api.md for the HTTP API
+├── Dockerfile               # one image for the API and every command
+├── docker-compose.yml       # db, migrate, api
 ├── Makefile
 └── .github/workflows/ci.yml
 ```

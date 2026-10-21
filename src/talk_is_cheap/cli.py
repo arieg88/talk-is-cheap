@@ -1893,6 +1893,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-cost", type=Decimal, help="US dollars this run may spend (default LLM_COST_CAP)"
     )
 
+    serving = commands.add_parser(
+        "serve", help="the HTTP API: chat, promises, track records, guidance, financials"
+    )
+    serving.add_argument("--host", default="127.0.0.1", help="(default 127.0.0.1)")
+    serving.add_argument("--port", type=int, default=8080, help="(default 8080)")
+    serving.add_argument("--reload", action="store_true", help="restart when code changes")
+
     graph = commands.add_parser("agent-graph", help="write the agent's graph as Mermaid")
     graph.add_argument(
         "--output", type=Path, default=Path("docs/agent-graph.md"),
@@ -2147,6 +2154,10 @@ def _run(args: argparse.Namespace) -> int:
             return asyncio.run(
                 ask_command(args.question, args.thread, args.model, args.show_trace, args.max_cost)
             )
+        case "serve":
+            from talk_is_cheap.api.server import serve
+
+            return serve(args.host, args.port, args.reload)
         case "agent-graph":
             from talk_is_cheap.agent.commands import agent_graph_command
 

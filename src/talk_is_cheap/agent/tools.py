@@ -7,6 +7,7 @@ passages cut to PASSAGE_CHARS. A tool that cannot answer says why instead of rai
 the model can try something else.
 """
 
+import asyncio
 import difflib
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -113,6 +114,9 @@ class ToolContext:
     evidence: EvidenceLog = field(default_factory=EvidenceLog)
     calls: list[ToolCall] = field(default_factory=list)
     sql_timeout_seconds: float = sql.STATEMENT_TIMEOUT_SECONDS
+    # A call that takes longer is stopped and its error returned to the model, which can
+    # try something else; None for no limit.
+    tool_timeout_seconds: float | None = None
     # Hybrid results the cross-encoder re-orders in `search_filings` and `search_news`;
     # None for the retrieval default.
     rerank_depth: int | None = None
@@ -924,13 +928,20 @@ TOOLS: Mapping[str, tuple[ToolFunction, type[BaseModel]]] = {
 
 
 async def call_tool(ctx: ToolContext, name: str, arguments: Mapping[str, Any]) -> ToolOutput:
-    """Validate the arguments, run the tool and log the call. A failure is returned as
-    an `error` the model reads, never raised."""
+    """Validate the arguments, run the tool and log the call. A failure, or a call
+    longer than `ctx.tool_timeout_seconds`, is returned as an `error` the model reads,
+    never raised."""
     function, schema = TOOLS[name]
     started = time.monotonic()
     error = None
     try:
-        output = await function(ctx, schema.model_validate(dict(arguments)))
+        async with asyncio.timeout(ctx.tool_timeout_seconds):
+            output = await function(ctx, schema.model_validate(dict(arguments)))
+    except TimeoutError:
+        error = (
+            f"{name} timed out after {ctx.tool_timeout_seconds:g} seconds; try a narrower "
+            "query or another tool"
+        )
     except ToolFailed as exc:
         error = str(exc)
     except ValueError as exc:  # pydantic's ValidationError among them

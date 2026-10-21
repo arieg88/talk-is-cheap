@@ -2,6 +2,7 @@
 budget LLM_BUDGET_USD. Cached responses cost nothing and are not recorded."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -15,11 +16,19 @@ from talk_is_cheap.guidance.llm import Budget, Pricing, Usage
 
 class DatabaseLedger:
     """Records each paid call of one command in `llm_spend`, in its own transaction, so a
-    run that stops or fails keeps the record of what it spent."""
+    run that stops or fails keeps the record of what it spent. `api_key`: the id of the
+    API key a chat question was asked with."""
 
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], command: str) -> None:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        command: str,
+        *,
+        api_key: str | None = None,
+    ) -> None:
         self._sessions = sessions
         self._command = command
+        self._api_key = api_key
 
     async def record(
         self, model: str, prompt_version: str | None, usage: Usage, cost: Decimal
@@ -34,6 +43,7 @@ class DatabaseLedger:
                     output_tokens=usage.output_tokens,
                     cost=cost,
                     counted=True,
+                    api_key=self._api_key,
                 )
             )
 
@@ -89,6 +99,19 @@ async def counted_spend(session: AsyncSession) -> Decimal:
         select(func.coalesce(func.sum(LlmSpend.cost), 0)).where(LlmSpend.counted)
     )
     return Decimal(total or 0)
+
+
+async def spend_since(
+    session: AsyncSession, since: datetime, *, command: str, api_key: str | None = None
+) -> Decimal:
+    """What one command has spent since `since`; only under one API key when `api_key`
+    is given."""
+    statement = select(func.coalesce(func.sum(LlmSpend.cost), 0)).where(
+        LlmSpend.counted, LlmSpend.command == command, LlmSpend.recorded_at >= since
+    )
+    if api_key is not None:
+        statement = statement.where(LlmSpend.api_key == api_key)
+    return Decimal(await session.scalar(statement) or 0)
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 """Database readiness checks."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -39,3 +40,14 @@ async def check_database(engine: AsyncEngine) -> DatabaseStatus:
         vector_extension_version=vector_version,
         migration_revision=revision,
     )
+
+
+def migration_head(alembic_ini: Path) -> str | None:
+    """The newest migration in the project's Alembic scripts, or None when they are not
+    there."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    if not alembic_ini.exists():
+        return None
+    return ScriptDirectory.from_config(Config(str(alembic_ini))).get_current_head()

@@ -1,5 +1,6 @@
 """ORM models for companies, filings, financial data, filing text, news, the
-retrieval index, guidance, statements in the news, promises and agent runs."""
+retrieval index, guidance, statements in the news, promises, agent runs and the HTTP
+API's request log and feedback."""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -661,7 +662,10 @@ class LlmSpend(Base):
     """
 
     __tablename__ = "llm_spend"
-    __table_args__ = (Index("ix_llm_spend_recorded_at", "recorded_at"),)
+    __table_args__ = (
+        Index("ix_llm_spend_recorded_at", "recorded_at"),
+        Index("ix_llm_spend_api_key_recorded_at", "api_key", "recorded_at"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     recorded_at: Mapped[datetime] = mapped_column(
@@ -675,6 +679,8 @@ class LlmSpend(Base):
     cost: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     counted: Mapped[bool] = mapped_column(Boolean)
     note: Mapped[str | None] = mapped_column(Text)
+    # The id of the API key a chat question was asked with (never the key itself).
+    api_key: Mapped[str | None] = mapped_column(String(32))
 
 
 class AgentRun(Base):
@@ -712,6 +718,59 @@ class AgentRun(Base):
     usage: Mapped[dict[str, object]] = mapped_column(JSONB)
     verified: Mapped[bool] = mapped_column(Boolean)
     answer: Mapped[str] = mapped_column(Text)
+
+
+class RequestLog(Base):
+    """One request to the HTTP API: method, path, status, latency and the id of the API
+    key (never the key itself). A chat question also records how it ended (`outcome`),
+    its thread, and its run: the `agent_runs` row, model, tokens, cost and tool calls.
+    Health checks and the API docs are not logged."""
+
+    __tablename__ = "request_log"
+    __table_args__ = (
+        Index("ix_request_log_started_at", "started_at"),
+        Index("ix_request_log_key_id_started_at", "key_id", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(32), unique=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    method: Mapped[str] = mapped_column(String(8))
+    path: Mapped[str] = mapped_column(Text)
+    status: Mapped[int] = mapped_column(SmallInteger)
+    latency_ms: Mapped[int] = mapped_column(Integer)
+    key_id: Mapped[str | None] = mapped_column(String(32))
+    # Chat questions: completed, budget_exceeded, timeout, disconnected, ...
+    outcome: Mapped[str | None] = mapped_column(String(24))
+    thread_id: Mapped[str | None] = mapped_column(String(64))
+    agent_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL")
+    )
+    model: Mapped[str | None] = mapped_column(String(128))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    tool_calls: Mapped[int | None] = mapped_column(SmallInteger)
+
+
+class Feedback(Base):
+    """A thumbs up or down on a chat answer, by its request id, with an optional
+    comment: material for evals."""
+
+    __tablename__ = "feedback"
+    __table_args__ = (
+        CheckConstraint("rating IN ('up', 'down')", name="rating"),
+        Index("ix_feedback_request_id", "request_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("request_log.request_id", ondelete="CASCADE")
+    )
+    rating: Mapped[str] = mapped_column(String(4))
+    comment: Mapped[str | None] = mapped_column(Text)
+    key_id: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ArticleText(Base):

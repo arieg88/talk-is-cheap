@@ -18,11 +18,15 @@
 
 State is checkpointed per thread, so a follow-up ("and the quarter before?") sees the
 earlier questions, answers and evidence.
+
+The graph is built with its dependencies (`AgentDeps`), which a run can replace with its
+own, passed as the run's `context`: the HTTP API compiles the graph once and gives every
+request its own budget, evidence log and tool-call log.
 """
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
@@ -41,6 +45,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from langgraph.runtime import get_runtime
 from pydantic import BaseModel, Field
 
 from talk_is_cheap.agent.checks import Failure, cited_ids, code_checks, sentences
@@ -135,15 +140,16 @@ class AgentDeps:
     today: date
 
 
-def build_tools(ctx: ToolContext) -> list[StructuredTool]:
+def build_tools(context: Callable[[], ToolContext]) -> list[StructuredTool]:
     """The tools as LangChain tools: what the model reads is the JSON content, the
-    evidence items travel as the tool message's artifact."""
+    evidence items travel as the tool message's artifact. `context` gives the run's tool
+    context."""
 
     def make(name: str) -> StructuredTool:
         function, schema = TOOLS[name]
 
         async def run(**arguments: Any) -> tuple[str, list[Evidence]]:
-            output = await call_tool(ctx, name, arguments)
+            output = await call_tool(context(), name, arguments)
             content = json.dumps(output.content, default=str, separators=(",", ":"))
             return content, output.evidence
 
@@ -163,7 +169,13 @@ def tool_schemas(tools: Sequence[StructuredTool]) -> list[dict[str, Any]]:
 
 
 def build_graph(deps: AgentDeps, checkpointer: Any = None) -> Any:
-    tools = build_tools(deps.tools)
+    def current() -> AgentDeps:
+        """This run's dependencies: its `context` when it was given one, else the
+        graph's own."""
+        context = get_runtime(AgentDeps).context
+        return context if context is not None else deps
+
+    tools = build_tools(lambda: current().tools)
     schemas = tool_schemas(tools)
     universe = deps.tools.universe
     covered = [c for c in universe.companies if not c.news_only]
@@ -172,7 +184,8 @@ def build_graph(deps: AgentDeps, checkpointer: Any = None) -> Any:
     async def call(
         state: AgentState, node: str, messages: Sequence[BaseMessage], **options: Any
     ) -> tuple[Reply, dict[str, dict[str, Any]]]:
-        reply = await chat(deps.model, node, messages, deps.cache, deps.budget, **options)
+        run = current()
+        reply = await chat(run.model, node, messages, run.cache, run.budget, **options)
         usage = {k: dict(v) for k, v in (state.get("usage") or {}).items()}
         line = usage.setdefault(
             node, {"calls": 0, "cached": 0, "input_tokens": 0, "output_tokens": 0, "cost": 0.0}
@@ -187,7 +200,7 @@ def build_graph(deps: AgentDeps, checkpointer: Any = None) -> Any:
 
     async def router(state: AgentState) -> dict[str, Any]:
         question = state["question"]
-        deps.tools.evidence.reset(state.get("evidence") or {})
+        current().tools.evidence.reset(state.get("evidence") or {})
         history = _history(state.get("messages") or [])
         previous: QuestionType | None = state.get("question_type") if history else None
         route = route_by_rules(question, universe, previous)
@@ -233,7 +246,7 @@ def build_graph(deps: AgentDeps, checkpointer: Any = None) -> Any:
 
     async def planner(state: AgentState) -> dict[str, Any]:
         prompt = load_prompt("planner").format(
-            question_type=state["question_type"], today=deps.today.isoformat()
+            question_type=state["question_type"], today=current().today.isoformat()
         )
         history = _history_text(_history(state.get("messages") or []))
         question = state["question"] + (
@@ -252,10 +265,11 @@ def build_graph(deps: AgentDeps, checkpointer: Any = None) -> Any:
     async def executor(state: AgentState) -> dict[str, Any]:
         messages = state.get("messages") or []
         harvested = _harvest(messages)
-        deps.tools.evidence.sync({**(state.get("evidence") or {}), **harvested})
+        run = current()
+        run.tools.evidence.sync({**(state.get("evidence") or {}), **harvested})
         used = state.get("tool_calls", 0)
         remaining = MAX_TOOL_CALLS - used
-        prompt = load_prompt("executor").format(companies=companies, today=deps.today.isoformat())
+        prompt = load_prompt("executor").format(companies=companies, today=run.today.isoformat())
         conversation = _executor_messages(messages, state.get("plan") or [])
         if remaining <= 0:
             conversation.append(
@@ -378,7 +392,7 @@ def build_graph(deps: AgentDeps, checkpointer: Any = None) -> Any:
     def after_verifier(state: AgentState) -> str:
         return state.get("next_step") or "answer"
 
-    graph = StateGraph(AgentState)
+    graph = StateGraph(AgentState, context_schema=AgentDeps)
     graph.add_node("router", router)
     graph.add_node("planner", planner)
     graph.add_node("executor", executor)
@@ -425,6 +439,11 @@ def _history(messages: Sequence[BaseMessage]) -> list[tuple[str, str]]:
             pairs.append((question, text_of(message)))
             question = None
     return pairs
+
+
+def history(messages: Sequence[BaseMessage]) -> list[tuple[str, str]]:
+    """A thread's questions and answers, without tool calls or verifier feedback."""
+    return _history(messages)
 
 
 def _history_text(history: Sequence[tuple[str, str]]) -> str:

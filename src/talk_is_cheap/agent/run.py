@@ -59,6 +59,14 @@ class RunResult:
         return counts
 
 
+def run_config(thread_id: str) -> dict[str, Any]:
+    return {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+
+
+def run_inputs(question: str) -> dict[str, Any]:
+    return {"question": question, "messages": [HumanMessage(question)]}
+
+
 async def ask(
     graph: Any,
     deps: AgentDeps,
@@ -66,19 +74,30 @@ async def ask(
     thread_id: str,
     on_trace: Callable[[str], None] | None = None,
 ) -> RunResult:
-    """Run the graph on one question. `on_trace` receives a line per node step and tool
-    call as they happen."""
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+    """Run the graph on one question, with `deps` as the run's context. `on_trace`
+    receives a line per node step and tool call as they happen."""
     calls_before = len(deps.tools.calls)
     started = time.monotonic()
-    inputs = {"question": question, "messages": [HumanMessage(question)]}
-    async for chunk in graph.astream(inputs, config, stream_mode="updates"):
+    async for chunk in graph.astream(
+        run_inputs(question), run_config(thread_id), stream_mode="updates", context=deps
+    ):
         for node, update in chunk.items():
             if on_trace is not None:
                 for line in trace_lines(node, update):
                     on_trace(line)
+    return await run_result(graph, question, thread_id, deps.tools.calls[calls_before:], started)
+
+
+async def run_result(
+    graph: Any,
+    question: str,
+    thread_id: str,
+    tool_calls: list[ToolCall],
+    started: float,
+) -> RunResult:
+    """A finished run, read from the thread's state. `started` is its `time.monotonic()`."""
     seconds = time.monotonic() - started
-    state: Mapping[str, Any] = (await graph.aget_state(config)).values
+    state: Mapping[str, Any] = (await graph.aget_state(run_config(thread_id))).values
     return RunResult(
         question=question,
         thread_id=thread_id,
@@ -86,7 +105,7 @@ async def ask(
         final=state.get("final", ""),
         sources=list(state.get("sources") or []),
         question_type=state.get("question_type", ""),
-        tool_calls=deps.tools.calls[calls_before:],
+        tool_calls=tool_calls,
         usage=dict(state.get("usage") or {}),
         seconds=seconds,
         revisions=int(state.get("revision_count", 0)),

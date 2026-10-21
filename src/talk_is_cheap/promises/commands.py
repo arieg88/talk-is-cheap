@@ -319,30 +319,46 @@ async def resolve_command(
     return 0 if all(r.ok for r in results) else 1
 
 
-def _target(row: "PromiseRow") -> str:
+def target_amount(row: "PromiseRow") -> tuple[Decimal, str | None] | None:
+    """The value a promise must reach and its unit; None for an event or no target."""
     from talk_is_cheap.promises.baselines import metric_unit
-    from talk_is_cheap.promises.framing import show
 
     p = row.promise
     if p.target_kind == "event":
-        return "event"
+        return None
     if p.required_value is not None:
         # A multiple's or a change's required value is in the baseline's unit.
         unit = p.unit if p.target_kind in ("absolute", "threshold") else metric_unit(p.metric)
-        return show(p.required_value, unit)
+        return p.required_value, unit
     if p.target_value is not None:
-        return show(p.target_value, p.unit)
-    return "-"
+        return p.target_value, p.unit
+    return None
+
+
+def measured_amount(row: "PromiseRow") -> tuple[Decimal, str | None] | None:
+    """The value the resolver measured and its unit, in the framing's units."""
+    v = row.verdict
+    if v is None or v.measured_value is None:
+        return None
+    return v.measured_value, {"USD": "usd", "percent": "pct"}.get(
+        v.measured_unit or "", v.measured_unit
+    )
+
+
+def _target(row: "PromiseRow") -> str:
+    from talk_is_cheap.promises.framing import show
+
+    if row.promise.target_kind == "event":
+        return "event"
+    found = target_amount(row)
+    return "-" if found is None else show(*found)
 
 
 def _measured(row: "PromiseRow") -> str:
     from talk_is_cheap.promises.framing import show
 
-    v = row.verdict
-    if v is None or v.measured_value is None:
-        return "-"
-    unit = {"USD": "usd", "percent": "pct"}.get(v.measured_unit or "", v.measured_unit)
-    return show(v.measured_value, unit)
+    found = measured_amount(row)
+    return "-" if found is None else show(*found)
 
 
 def _verdict(row: "PromiseRow") -> str:
@@ -462,7 +478,8 @@ def _print_promise(row: "PromiseRow") -> None:
             print(f"    {mark:<5}{c['check']}" + (f": {c['detail']}" if c["detail"] else ""))
         print("\n  evidence cited:")
         for e in v.evidence:
-            print(f"    {e['id']:<5}{e['date'] or 'undated':<11}{e['tool']:<15}{_describe(e)}")
+            when = e["date"] or "undated"
+            print(f"    {e['id']:<5}{when:<11}{e['tool']:<15}{describe_evidence(e)}")
             if e.get("url"):
                 print(f"{'':36}{e['url']}")
         if v.measured:
@@ -475,7 +492,7 @@ def _print_promise(row: "PromiseRow") -> None:
               "the review's verdict counts")  # fmt: skip
 
 
-def _describe(item: dict[str, Any]) -> str:
+def describe_evidence(item: dict[str, Any]) -> str:
     data = item.get("data") or {}
     for key in ("display", "headline", "claim", "text", "span"):
         value = data.get(key)

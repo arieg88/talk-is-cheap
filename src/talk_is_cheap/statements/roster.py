@@ -108,3 +108,13 @@ def _closest_role(entries: Sequence[Executive], role: str | None) -> Executive:
 def roster_names(company: UniverseCompany) -> list[str]:
     """Every name and alias on the company's roster, for finding candidate articles."""
     return sorted({n for e in company.executives for n in e.names})
+
+
+def roster_name(company: UniverseCompany, name: str) -> str:
+    """The roster's name for an executive the press calls `name` ("Jensen Huang" is
+    "Jen-Hsun Huang"), or `name` itself when no entry has it as a name or alias."""
+    wanted = normalize_name(name)
+    for executive in company.executives:
+        if any(normalize_name(n) == wanted for n in executive.names):
+            return executive.name
+    return name

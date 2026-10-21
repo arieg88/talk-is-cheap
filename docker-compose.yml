@@ -17,5 +17,40 @@ services:
       timeout: 3s
       retries: 30
 
+  # Applies the migrations before the API starts.
+  migrate:
+    build: .
+    image: talk-is-cheap
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://talkischeap:talkischeap@db:5432/talkischeap
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    image: talk-is-cheap
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://talkischeap:talkischeap@db:5432/talkischeap
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      - cache:/app/.cache
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  cache:
