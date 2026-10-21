@@ -1900,6 +1900,10 @@ def build_parser() -> argparse.ArgumentParser:
     serving.add_argument("--port", type=int, default=8080, help="(default 8080)")
     serving.add_argument("--reload", action="store_true", help="restart when code changes")
 
+    ui = commands.add_parser("ui", help="the web UI (Streamlit) over the HTTP API at UI_API_URL")
+    ui.add_argument("--host", default="127.0.0.1", help="(default 127.0.0.1)")
+    ui.add_argument("--port", type=int, default=8501, help="(default 8501)")
+
     graph = commands.add_parser("agent-graph", help="write the agent's graph as Mermaid")
     graph.add_argument(
         "--output", type=Path, default=Path("docs/agent-graph.md"),
@@ -2158,6 +2162,10 @@ def _run(args: argparse.Namespace) -> int:
             from talk_is_cheap.api.server import serve
 
             return serve(args.host, args.port, args.reload)
+        case "ui":
+            from talk_is_cheap.ui.server import serve_ui
+
+            return serve_ui(args.host, args.port)
         case "agent-graph":
             from talk_is_cheap.agent.commands import agent_graph_command
 

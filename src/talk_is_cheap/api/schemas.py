@@ -91,6 +91,9 @@ class EvidenceLink(BaseModel):
     id: str
     date: dt.date | None
     tool: str
+    provenance: Provenance | None = Field(
+        description="SEC filing, company press release or news report"
+    )
     url: str | None
     description: str
 
@@ -196,7 +199,9 @@ class Rates(BaseModel):
 
 
 class TrackRecordOut(BaseModel):
-    key: str = Field(description='an executive ("Jen-Hsun Huang (NVDA)") or a ticker')
+    key: str = Field(
+        description='an executive ("Jen-Hsun Huang (NVDA)"), a ticker, or "all" with `by=all`'
+    )
     claims: int
     resolved: int
     by_verdict: dict[str, int]

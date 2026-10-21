@@ -1,0 +1,39 @@
+# The web UI (`talk-is-cheap ui`, docs/ui.md). Streamlit reads this file from the
+# working directory.
+
+[server]
+headless = true
+# Pages are served to people, not developed here: no "Rerun on save" prompts.
+runOnSave = false
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "viewer"
+showErrorDetails = "none"
+
+[runner]
+# Bare expressions in page code are never written to the page.
+magicEnabled = false
+
+[theme]
+font = "sans-serif"
+baseRadius = "medium"
+
+# Both themes are offered; the viewer's system setting picks one, and the settings
+# menu switches. Verdict colours (ui/format.py) read on either.
+[theme.light]
+primaryColor = "#1d4ed8"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f4f6"
+textColor = "#111827"
+linkColor = "#1d4ed8"
+
+[theme.dark]
+primaryColor = "#60a5fa"
+backgroundColor = "#0f172a"
+secondaryBackgroundColor = "#1e293b"
+textColor = "#e5e7eb"
+linkColor = "#93c5fd"

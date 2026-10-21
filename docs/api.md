@@ -1,8 +1,9 @@
 # HTTP API
 
-`talk-is-cheap serve` serves the agent and the stored data over HTTP, so a UI and other
-clients can use the project without the CLI: a streaming chat, and typed JSON endpoints
-for promises, track records, guidance, financials and coverage. It is a thin layer over
+`talk-is-cheap serve` serves the agent and the stored data over HTTP, so the web UI
+([ui.md](ui.md)) and other clients can use the project without the CLI: a streaming
+chat, and typed JSON endpoints for promises, track records, guidance, financials and
+coverage. It is a thin layer over
 the same query functions the commands use (`financials.py`, `guidance/queries.py`,
 `promises/queries.py`, `promises/track.py`, `companies.py`) and the same agent graph as
 `ask`. The OpenAPI document is at `/docs` (and `/openapi.json`), with every response
@@ -98,7 +99,7 @@ cursor 400. Decimal figures are JSON strings, so no precision is lost.
 | `GET /v1/companies` | Loaded companies with coverage: latest quarter, guidance rows, linked articles, management claims, due claims |
 | `GET /v1/companies/{ticker}/promises` | Promises, newest statement first. Filters: `verdict`, `speaker` (the roster name or an alias), `due_before`, `due_after`, `open`, `bold`, `include_scheduled` |
 | `GET /v1/promises/{id}` | One promise as `promises show` prints it |
-| `GET /v1/track-record` | `by=executive\|company`, `ticker`, `specific_only` |
+| `GET /v1/track-record` | `by=executive\|company\|all` (`all`: one record of every claim selected), `ticker`, `specific_only` |
 | `GET /v1/companies/{ticker}/guidance` | Guidance rows with actuals, verdicts and review status; `metric`, `flagged` |
 | `GET /v1/companies/{ticker}/financials` | `vintage=first\|latest` (default `first`), `quarters` (default 8) |
 | `POST /v1/feedback` | Thumbs up or down on a chat answer, by `request_id`, with an optional comment |
@@ -170,13 +171,15 @@ the full `claim`, `deadline_text`, `bold_basis`, `baseline`, framing `notes`, th
              {"check": "on_time", "passed": null,
               "detail": "delivered 2026-08-26 (published), on time until unknown"}],
   "evidence": [{"id": "E1", "date": "2026-08-26", "tool": "search_filings",
+                "provenance": "company_press_release",
                 "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000073/q2fy27pr.htm",
                 "description": "…"}],
   "gathered": 26}}
 ```
 
 Findings the judge marked irrelevant are left out, as `promises show` does; `passed` is
-null for a check that is a note.
+null for a check that is a note. Each piece of evidence has its `provenance`
+(`sec_filing`, `company_press_release` or `news_report`), as citations do.
 
 **Track records.**
 
@@ -199,7 +202,9 @@ curl -H "X-API-Key: $KEY" "localhost:8080/v1/track-record?by=executive&ticker=NV
 ```
 
 A group with fewer than `min_resolved` resolved claims has `too_few_to_judge: true` and
-`rates: null`. The counting rules are those of `promises track-record`
+`rates: null`. `by=all` gives one record, keyed `all`, of every claim selected (every
+company's, or one company's with `ticker`): what the web UI shows for "All companies"
+([ui.md](ui.md)). The counting rules are those of `promises track-record`
 ([promises.md](promises.md)).
 
 **Guidance.**

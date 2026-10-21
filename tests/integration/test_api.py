@@ -185,6 +185,7 @@ def verdict(promise_id: int, name: str, **values: Any) -> PromiseVerdict:
                 "id": "E1",
                 "date": "2026-05-01",
                 "tool": "search_filings",
+                "provenance": "sec_filing",
                 "url": doc_url(Q1_10Q, "apix-q1.htm"),
                 "data": {"text": "Product shipped in April."},
             }
@@ -565,6 +566,7 @@ async def test_promise_detail_like_promises_show(api: tuple[FastAPI, httpx.Async
     ]  # the irrelevant item is left out, as `promises show` does
     assert resolution["checks"][0] == {"check": "evidence_exist", "passed": True, "detail": None}
     assert resolution["evidence"][0]["description"] == "Product shipped in April."
+    assert resolution["evidence"][0]["provenance"] == "sec_filing"
     assert resolution["gathered"] == 2
     assert detail["review"]["verdict"] == "walked_back"
     assert detail["review"]["note"] == "lowered in March"
@@ -595,6 +597,9 @@ async def test_track_records(api: tuple[FastAPI, httpx.AsyncClient]) -> None:
         await client.get("/v1/track-record", params={"ticker": TICKER, "by": "company"})
     ).json()["items"]
     assert [r["key"] for r in by_company] == [TICKER] and by_company[0]["claims"] == 6
+    everything = (await client.get("/v1/track-record", params={"by": "all"})).json()["items"]
+    assert [r["key"] for r in everything] == ["all"] and everything[0]["claims"] >= 6
+    assert everything[0]["vague"] >= jane["vague"]
     specific = (
         await client.get("/v1/track-record", params={"ticker": TICKER, "specific_only": True})
     ).json()["items"]

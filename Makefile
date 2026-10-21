@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install db db-down db-reset migrate db-check ingest index extract refresh-claims eval-retrieval eval-guidance eval-statements eval-promises smoke-agent agent-graph api lint format typecheck test test-unit check
+.PHONY: help install db db-down db-reset migrate db-check ingest index extract refresh-claims eval-retrieval eval-guidance eval-statements eval-promises smoke-agent agent-graph api ui lint format typecheck test test-unit check
 
 help: ## List available commands
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -68,6 +68,12 @@ API_PORT ?= 8080
 
 api: ## Run the HTTP API on API_HOST:API_PORT (127.0.0.1:8080), reloading on code changes; docs at /docs
 	uv run talk-is-cheap serve --host $(API_HOST) --port $(API_PORT) --reload
+
+UI_HOST ?= 127.0.0.1
+UI_PORT ?= 8501
+
+ui: ## Run the web UI on UI_HOST:UI_PORT (127.0.0.1:8501) against the API at UI_API_URL (default 127.0.0.1:8080, `make api`)
+	uv run talk-is-cheap ui --host $(UI_HOST) --port $(UI_PORT)
 
 lint: ## Check lint and formatting
 	uv run ruff check .

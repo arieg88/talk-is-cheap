@@ -350,6 +350,7 @@ def evidence_links(items: Sequence[dict[str, Any]]) -> list[EvidenceLink]:
             id=str(e["id"]),
             date=e.get("date"),
             tool=str(e.get("tool", "")),
+            provenance=e.get("provenance"),
             url=e.get("url") or None,
             description=describe_evidence(e),
         )
@@ -363,13 +364,17 @@ def evidence_links(items: Sequence[dict[str, Any]]) -> list[EvidenceLink]:
 @data.get("/track-record", response_model=TrackRecordPage)
 async def track_record(
     session: Session,
-    by: Literal["executive", "company"] = "executive",
+    by: Annotated[
+        Literal["executive", "company", "all"],
+        Query(description="one record per executive, per company, or one for everything"),
+    ] = "executive",
     ticker: Annotated[str | None, Query(pattern=r"^[A-Za-z.\-]{1,16}$")] = None,
     specific_only: bool = False,
     limit: Limit = DEFAULT_LIMIT,
     cursor: Cursor = None,
 ) -> TrackRecordPage:
-    """Track records per executive or per company, most resolved claims first. A group
+    """Track records per executive or per company (or one, `all`, for every claim
+    selected), most resolved claims first. A group
     with fewer than `min_resolved` resolved claims is `too_few_to_judge`, without rates."""
     if ticker is not None:
         await company_or_404(session, ticker)

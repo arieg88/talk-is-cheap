@@ -50,7 +50,7 @@ class Scored:
 
 @dataclass(slots=True)
 class TrackRecord:
-    key: str  # an executive ("Jen-Hsun Huang (NVDA)") or a ticker
+    key: str  # an executive ("Jen-Hsun Huang (NVDA)"), a ticker, or "all"
     claims: int = 0  # scorable claims, resolved or not
     by_verdict: dict[str, int] = field(default_factory=dict)
     days_late: list[int] = field(default_factory=list)
@@ -165,16 +165,22 @@ async def scored_forecasts(session: AsyncSession, ticker: str | None) -> list[Sc
     return scored
 
 
+def group_key(by: str, ticker: str, speaker: str) -> str:
+    if by == "executive":
+        return speaker_key(ticker, speaker)
+    return ticker if by == "company" else "all"
+
+
 def track_records(scored: Sequence[Scored], vague: Vague, by: str) -> list[TrackRecord]:
-    """Records by "executive" or "company", most resolved claims first."""
+    """Records by "executive" or "company", or one of every claim ("all"), most resolved
+    claims first."""
     records: dict[str, TrackRecord] = {}
 
     def record(key: str) -> TrackRecord:
         return records.setdefault(key, TrackRecord(key))
 
     for claim in scored:
-        key = speaker_key(claim.ticker, claim.speaker) if by == "executive" else claim.ticker
-        r = record(key)
+        r = record(group_key(by, claim.ticker, claim.speaker))
         r.claims += 1
         r.promise_ids.extend(claim.promise_ids)
         if claim.verdict is None:
@@ -186,7 +192,7 @@ def track_records(scored: Sequence[Scored], vague: Vague, by: str) -> list[Track
             r.bold += 1
             r.bold_kept += claim.verdict in ("delivered", "delivered_late")
     for (ticker, speaker), count in vague.items():
-        record(speaker_key(ticker, speaker) if by == "executive" else ticker).vague += count
+        record(group_key(by, ticker, speaker)).vague += count
     return sorted(records.values(), key=lambda r: (-r.resolved, -r.claims, r.key))
 
 
