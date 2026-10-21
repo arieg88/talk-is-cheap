@@ -2,6 +2,7 @@
 specificity, boldness, the rule), the resolver's checks, cited numbers and track
 records."""
 
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -701,3 +702,44 @@ def test_the_judge_reads_whole_passages_or_windows_around_key_terms() -> None:
     read = judge_text(long, ["MI300X", "Azure"])
     assert "Azure ND MI300X v5" in read and len(read) <= JUDGE_TEXT_CHARS + 10
     assert judge_text(long, ["Nothing"]).startswith("x x")
+
+
+def test_the_outcome_of_a_company_claim_is_its_reported_actuals() -> None:
+    from talk_is_cheap.db.models import Promise
+    from talk_is_cheap.promises.outcomes import (
+        Subject,
+        has_series,
+        outcome_request,
+        register,
+        subject_of,
+    )
+
+    promise = Promise(ticker="NVDA", metric="gross_margin")
+    subject = subject_of(promise)
+    assert subject == Subject("company", "NVDA", "gross_margin")
+    assert outcome_request(subject, ["FY2025Q2"]) == (
+        "get_actuals",
+        {"ticker": "NVDA", "metrics": ["gross_profit", "revenue"], "periods": ["FY2025Q2"],
+         "vintage": "first"},
+    )  # fmt: skip
+    assert outcome_request(Subject("company", "NVDA", "users"), ["FY2025Q2"]) is None
+    index = Subject("index", "SPX", "level")
+    assert not has_series(index) and outcome_request(index, ["2026"]) is None
+
+    class IndexLevels:
+        def reports(self, subject: Subject) -> bool:
+            return subject.metric == "level"
+
+        def request(self, subject: Subject, periods: Sequence[str]) -> tuple[str, dict[str, Any]]:
+            return "get_index_levels", {"index": subject.key, "periods": list(periods)}
+
+    register("index", IndexLevels())
+    try:
+        assert has_series(index)
+        assert outcome_request(index, ["2026"]) == (
+            "get_index_levels", {"index": "SPX", "periods": ["2026"]},
+        )  # fmt: skip
+    finally:
+        from talk_is_cheap.promises import outcomes
+
+        outcomes._SOURCES.pop("index")

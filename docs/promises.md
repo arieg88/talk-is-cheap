@@ -124,6 +124,16 @@ or before it.
 | What happened: launches, delays, cancellations, revised targets | later filings and press releases, later news | `search_filings`, `search_news` (`date_from`/`date_to`) |
 | Whether the claim was walked back or restated | the company's later statements | `get_statements` (`date_from`/`date_to`) |
 
+**Outcome sources** (`promises/outcomes.py`). A promise records what it is about:
+`subject_kind` (`company`, `index`, `sector`, `macro`) and `subject_key` (a ticker, or a
+series' identifier). The resolver asks `outcome_request(subject, periods)` for the tool
+call that reports the subject's metric for the periods it needs, and runs it like any
+other evidence call, so the outcome is cited and dated like all evidence. A company's
+outcome is `get_actuals` (XBRL values as first reported); management claims are always
+about their company. An index, a sector or a macro series plugs in by registering a
+source for its kind (`register`) backed by a tool of its own; none is built, and until
+one is, such a claim would be judged from filings and news alone.
+
 **`cite_value`** (`agent/tools.py`) gives a number from text the same grounding as a
 reported value: it takes the evidence id of a passage, headline or quote and the exact
 span holding the number; code checks the span is in the item's text (with the guidance
@@ -267,7 +277,7 @@ Company statements and spokespeople form one group per company ("NVDA (company)"
 | Command | What it does |
 | --- | --- |
 | `promises frame [--tickers] [--limit N] [--dry-run] [--missing-only] [--promises ID,ID] [--model]` | Frame claims that have no promise of the current version (`--promises`: only the claims of these promises); prints the calls, the most it can cost and the budget first |
-| `promises resolve [--tickers] [--limit N] [--dry-run] [--due-only/--no-due-only] [--model]` | Resolve due claims (one per group, 4 at a time), one line per claim, then per company: verdicts, failed checks, tokens, cost, seconds a claim |
+| `promises resolve [--tickers] [--limit N] [--dry-run] [--due-only/--no-due-only] [--model] [--check-budget]` | Resolve due claims (one per group, 4 at a time), one line per claim, then per company: verdicts, failed checks, tokens, cost, seconds a claim. `--check-budget` (also on `frame`): no call, exit 3, when the typical cost exceeds the budget left; `make refresh-claims` chains extraction, framing and resolution this way |
 | `promises NVDA [--verdict V] [--open] [--bold]` (or `all`) | Date, speaker, claim, due date, verdict, measured value against the target, and the rule |
 | `promises show ID` | The claim, the rule, the baseline, every cited item with its date and link, the measured value, the checks, the reasoning and any review |
 | `promises review ID --verdict V [--note]` | Record a reviewer's verdict |
@@ -471,10 +481,12 @@ cost nothing, every response coming from the cache.
 
 - **News history depth.** Claims exist only for stories in stored news; most are from
   2026 and not due. Older claims arrive with the GDELT backfill and article extraction.
-- **Google News links.** 66% of linked stories have only a Google News link, which cannot
-  be followed ([statements.md](statements.md)), so most of what executives said is never
-  read, and track records cover the few companies whose news can be fetched (Nvidia
-  above all).
+- **Google News links.** On 2026-10-20, 66% of linked stories had only a Google News
+  link, which cannot be followed ([statements.md](statements.md)), so most of what
+  executives said was never read, and track records cover the few companies whose news
+  can be fetched (Nvidia above all). Finnhub now recovers a publisher URL for 15% of those
+  stories, and the archives add older articles ([news.md](news.md)); the figures in this
+  document predate both.
 - **Claims no free source reports.** Operating figures that are only in text (units,
   users, cities) have no stored series, so their baselines are unknown unless the article
   states them; segment revenue, non-GAAP figures, product launches and corporate actions

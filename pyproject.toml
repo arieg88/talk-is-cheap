@@ -1,7 +1,7 @@
 [project]
 name = "talk-is-cheap"
 version = "0.1.0"
-description = "An AI analyst that compares what public companies say with what they report."
+description = "Holds executives to what they say in public: claims from interviews and press statements, judged against what actually happened."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

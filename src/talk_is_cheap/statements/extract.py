@@ -15,9 +15,10 @@ import hashlib
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from talk_is_cheap.db.models import Company, Statement
@@ -37,7 +38,11 @@ from talk_is_cheap.guidance.llm import (
     complete,
     load_prompt_file,
 )
-from talk_is_cheap.statements.candidates import Candidate, candidates
+from talk_is_cheap.statements.candidates import (
+    Candidate,
+    candidates,
+    quotes_executive_forward,
+)
 from talk_is_cheap.statements.items import PROCESSING_VERSION, Claim, Dropped, SourceText, process
 from talk_is_cheap.statements.outcomes import FindContext, rebuild_outcomes
 from talk_is_cheap.statements.schema import StatementExtraction
@@ -56,6 +61,14 @@ INPUT_OVERHEAD_TOKENS = 1_200
 # Article text sent to the model, cut at a paragraph boundary: long pages are mostly
 # related-story lists and boilerplate after this.
 MAX_TEXT_CHARS = 12_000
+# Stories that need a model call, at most, per run (`--max-stories`), chosen by
+# `priority`.
+MAX_STORIES = 500
+# Stories older than this are ranked ahead of recent ones: their claims are more likely
+# to be due.
+RECENT = timedelta(days=183)
+# Companies with fewer management claims than this are ranked ahead of covered ones.
+THIN_COVERAGE = 15
 
 
 def load_prompt(version: str = PROMPT_VERSION) -> str:
@@ -114,6 +127,7 @@ class CompanyPlan:
     stories: int  # linked stories
     planned: list[PlannedStory]
     stale: list[int]  # stored extractions (article ids) no longer among the candidates
+    held: list[PlannedStory] = field(default_factory=list)  # calls left for later runs
 
     def count(self, status: str) -> int:
         return sum(p.status == status for p in self.planned)
@@ -137,10 +151,13 @@ async def plan_companies(
     prompt_version: str = PROMPT_VERSION,
     missing_only: bool = False,
     limit: int | None = None,
+    max_stories: int | None = None,
+    today: date | None = None,
 ) -> list[CompanyPlan]:
     """What a run would do with each candidate story. `limit` keeps, per company, the
     first `limit` stories that need work (oldest first); up-to-date stories are listed
-    as well, and nothing is removed as stale."""
+    as well, and nothing is removed as stale. `max_stories` keeps, across companies, the
+    stories needing a model call that `priority` ranks first; the rest are `held`."""
     found, totals = await candidates(session, companies)
     plans = []
     for company in companies:
@@ -180,7 +197,56 @@ async def plan_companies(
         current = {c.story.article_id for c in found[company.ticker]}
         stale = [] if limit is not None else sorted(set(stored) - current)
         plans.append(CompanyPlan(company.ticker, totals[company.ticker], planned, stale))
+    if max_stories is not None:
+        claims = await management_claims(session)
+        by_ticker = {c.ticker: c for c in companies}
+        when = today or date.today()
+        calls = [
+            (priority(p, by_ticker[plan.ticker], claims.get(plan.ticker, 0), when), plan, p)
+            for plan in plans
+            for p in plan.planned
+            if p.status == "call"
+        ]
+        calls.sort(key=lambda entry: entry[0])
+        for _, plan, held in calls[max_stories:]:
+            plan.planned.remove(held)
+            plan.held.append(held)
     return plans
+
+
+def priority(
+    planned: PlannedStory, company: UniverseCompany, management_claims: int, today: date
+) -> tuple[bool, bool, bool, date, int]:
+    """Sort key of a story needing a call, first first: stories quoting a roster
+    executive with a forward-looking marker inside the quote; then stories from before
+    the last RECENT (their claims are more likely due); then companies with fewer than
+    THIN_COVERAGE management claims; then the oldest."""
+    story = planned.candidate.story
+    published = story.published_at.date()
+    return (
+        not quotes_executive_forward(story.text, company),
+        published >= today - RECENT,
+        management_claims >= THIN_COVERAGE,
+        published,
+        story.article_id,
+    )
+
+
+async def measured_cost(session: AsyncSession) -> Decimal | None:
+    """The mean cost of the stories extracted with a paid call so far, or None before
+    the first."""
+    mean = await session.scalar(select(func.avg(ExtractionRow.cost)).where(ExtractionRow.cost > 0))
+    return None if mean is None else Decimal(mean).quantize(Decimal("0.000001"))
+
+
+async def management_claims(session: AsyncSession) -> dict[str, int]:
+    """Management claims stored per company."""
+    rows = await session.execute(
+        select(Statement.ticker, func.count())
+        .where(Statement.management)
+        .group_by(Statement.ticker)
+    )
+    return {ticker: int(count) for ticker, count in rows}
 
 
 @dataclass(slots=True)
@@ -219,6 +285,7 @@ async def extract_statements(
     prompt_version: str = PROMPT_VERSION,
     missing_only: bool = False,
     limit: int | None = None,
+    max_stories: int | None = None,
     find_context: FindContext | None = None,
     on_result: Callable[[ExtractResult], None] | None = None,
 ) -> list[ExtractResult]:
@@ -236,6 +303,7 @@ async def extract_statements(
             prompt_version=prompt_version,
             missing_only=missing_only,
             limit=limit,
+            max_stories=max_stories,
         )
     by_ticker = {c.ticker: c for c in companies}
     results = []

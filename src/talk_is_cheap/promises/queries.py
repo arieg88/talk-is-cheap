@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from talk_is_cheap.db.models import Article, Promise, PromiseReview, PromiseVerdict
+from talk_is_cheap.news.queries import ARTICLE_LINK, ARTICLE_PUBLISHER
 from talk_is_cheap.statements.roster import normalize_name
 
 # Verdicts that settle a claim; the others leave it open or undecided.
@@ -51,7 +52,7 @@ async def promise_rows(
     """Current promises, newest statement first (every company's when `ticker` is
     None)."""
     statement = (
-        select(Promise, PromiseVerdict, PromiseReview, Article.publisher, Article.url)
+        select(Promise, PromiseVerdict, PromiseReview, ARTICLE_PUBLISHER, ARTICLE_LINK)
         .join(Article, Article.id == Promise.article_id)
         .outerjoin(PromiseVerdict, PromiseVerdict.promise_id == Promise.id)
         .outerjoin(PromiseReview, PromiseReview.claim_key == Promise.claim_key)
@@ -85,7 +86,7 @@ async def promise_rows(
 async def promise_row(session: AsyncSession, promise_id: int) -> PromiseRow | None:
     found = (
         await session.execute(
-            select(Promise, PromiseVerdict, PromiseReview, Article.publisher, Article.url)
+            select(Promise, PromiseVerdict, PromiseReview, ARTICLE_PUBLISHER, ARTICLE_LINK)
             .join(Article, Article.id == Promise.article_id)
             .outerjoin(PromiseVerdict, PromiseVerdict.promise_id == Promise.id)
             .outerjoin(PromiseReview, PromiseReview.claim_key == Promise.claim_key)

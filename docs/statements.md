@@ -7,6 +7,10 @@ with what the company later reported and with its formal guidance.
 
 ## 1. Data
 
+The figures in this section and in sections 6 to 9 were measured on 2026-10-20, before
+the archive, Finnhub and new-feed sources ([news.md](news.md), sections 2, 9 and 10)
+were added; statements have not been extracted from those stories yet.
+
 Measured on the development database on 2026-10-20: 3,688 articles from January 2024 to
 October 2026, 2,695 stories (dedup clusters) linked to a company with confidence 0.5 or
 more, of 2,371 distinct clusters.
@@ -131,8 +135,28 @@ Runs are incremental like guidance extraction: a story extracted with the same m
 prompt version and prompt text is skipped; a new post-processing version re-processes
 stored responses from the cache; stories that stop being candidates lose their claims.
 `--limit N` takes at most N stories needing work per company; `--missing-only` keeps
-stories extracted with another model; `--dry-run` prints candidates, calls, tokens, the
-most a run can cost and the typical cost.
+stories extracted with another model; `--dry-run` prints candidates per company and per
+publisher, calls, tokens, the most a run can cost and the estimate at the measured cost
+of a story (the mean of the paid extractions so far, $0.00118); `--check-budget` makes
+no call (exit 3) when that estimate exceeds what is left of `LLM_BUDGET_USD`.
+
+**Which stories are paid for** (`--max-stories N`, default 500, `extract.py: priority`):
+across companies, at most N stories needing a model call, ranked:
+
+1. stories where one passage names a roster executive and holds a direct quote with a
+   forward-looking marker inside the quotation marks (`candidates.py:
+   quotes_executive_forward`);
+2. then stories published more than six months ago (`RECENT`), whose claims are more
+   likely due;
+3. then companies with fewer than 15 management claims (`THIN_COVERAGE`) ahead of
+   covered ones;
+4. then the oldest.
+
+Stories left out are `held` and listed per company and publisher; cached and
+re-processed stories cost nothing and always run. `make refresh-claims` runs
+`extract statements --missing-only --max-stories 500`, `promises frame --missing-only`
+and `promises resolve --due-only`, each with `--check-budget`, so it stops before a paid
+stage whose estimate exceeds the budget left.
 
 ## 4. Attribution rules
 
@@ -324,11 +348,12 @@ analyst figures) first hit the 3,000-token output limit and failed; the limit is
 
 ## 10. Known limitations
 
-- **News coverage.** 66% of linked stories have only a Google News link, whose
-  robots.txt forbids following it, and 12% more are refused (403, robots.txt, paywalls). Reuters, Bloomberg,
-  WSJ, Barron's and Investor's Business Daily, where executives are quoted most, are not
-  read. Stories exist only for days polled (since 2026-10-18) or backfilled from GDELT
-  around earnings.
+- **News coverage.** On 2026-10-20, 66% of linked stories had only a Google News link,
+  whose robots.txt forbids following it, and 12% more were refused (403, robots.txt,
+  paywalls). Finnhub now supplies a publisher URL for 15% of the Google-News-only stories,
+  and archived articles and Finnhub's news reach back before polling began ([news.md](news.md),
+  sections 9 and 10), but Reuters, Bloomberg, WSJ, Barron's and Investor's Business Daily,
+  where executives are quoted most, are still not read.
 - **Paywalls and teasers.** Pages that serve a teaser are detected by length and a few
   subscription phrases; a teaser over 400 characters is stored as if it were the article.
 - **Reporter paraphrase.** Most management claims (233 of 357) are company statements as

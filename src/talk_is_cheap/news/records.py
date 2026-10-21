@@ -9,6 +9,7 @@ class TimePrecision(StrEnum):
     """What an article's `published_at` means."""
 
     PUBLISHED = "published"  # the publish time the feed states
+    DATE = "date"  # only the publication day is known (an archived page, a URL's date)
     SEEN = "seen"  # when a crawler first saw the article (GDELT); later than publishing
     FETCHED = "fetched"  # the feed gave no time; when this system first fetched it
 

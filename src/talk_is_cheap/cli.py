@@ -623,10 +623,18 @@ async def _backfill_news(
 
 
 async def _reprocess_news() -> int:
+    from talk_is_cheap.news import archives, finnhub
     from talk_is_cheap.news.adapters import feed_links
+    from talk_is_cheap.news.archive_index import COMMON_CRAWL, WAYBACK
     from talk_is_cheap.news.gdelt import FEED_LINK, GdeltBackfill
     from talk_is_cheap.news.linking import CompanyMatcher
-    from talk_is_cheap.news.locks import BACKFILL_LOCK, POLL_LOCK, advisory_locks
+    from talk_is_cheap.news.locks import (
+        ARCHIVES_LOCK,
+        BACKFILL_LOCK,
+        FINNHUB_LOCK,
+        POLL_LOCK,
+        advisory_locks,
+    )
     from talk_is_cheap.news.store import reprocess
 
     config = _news_config(None)
@@ -637,7 +645,8 @@ async def _reprocess_news() -> int:
     try:
         if not await _database_reachable(engine):
             return 1
-        async with advisory_locks(engine, POLL_LOCK, BACKFILL_LOCK) as locked:
+        locks = (POLL_LOCK, BACKFILL_LOCK, ARCHIVES_LOCK, FINNHUB_LOCK)
+        async with advisory_locks(engine, *locks) as locked:
             if not locked:
                 print("a news poll or backfill is running; try again later", file=sys.stderr)
                 return 1
@@ -645,7 +654,13 @@ async def _reprocess_news() -> int:
                 result = await reprocess(
                     session,
                     CompanyMatcher([c for c in universe.companies if c.name]),
-                    feed_links() | {GdeltBackfill.type: FEED_LINK},
+                    feed_links()
+                    | {
+                        GdeltBackfill.type: FEED_LINK,
+                        COMMON_CRAWL: archives.FEED_LINK,
+                        WAYBACK: archives.FEED_LINK,
+                        finnhub.SERVICE: finnhub.FEED_LINK,
+                    },
                 )
     finally:
         await engine.dispose()
@@ -759,15 +774,15 @@ def _print_backfill(sources: Sequence["BackfillSource"], now: datetime) -> int:
         print("no backfill run yet; run `talk-is-cheap ingest news --backfill --since ...`")
         return 0
     print(
-        f"{'SOURCE':<14}{'WEEKS':>6}  {'FIRST TO LAST WEEK':<23}{'ARTICLES':>9}{'TRUNC':>6}  "
-        f"{'LAST SUCCESS':<14}{'FAILS':>5}  ERROR"
+        f"{'SOURCE':<18}{'WINDOWS':>8}  {'FIRST TO LAST WINDOW':<23}{'ARTICLES':>9}"
+        f"{'TRUNC':>6}  {'LAST SUCCESS':<14}{'FAILS':>5}  ERROR"
     )
     for b in sources:
         covered = "-"
         if b.first_window is not None and b.last_window is not None:
             covered = f"{b.first_window:%Y-%m-%d} to {b.last_window:%Y-%m-%d}"
         print(
-            f"{b.key:<14}{b.windows:>6}  {covered:<23}{b.articles:>9}{b.truncated:>6}  "
+            f"{b.key:<18}{b.windows:>8}  {covered:<23}{b.articles:>9}{b.truncated:>6}  "
             f"{_ago(b.last_success_at, now):<14}{b.consecutive_failures:>5}  "
             f"{(b.last_error or '')[:70]}"
         )
@@ -1459,6 +1474,10 @@ def _tickers(text: str) -> list[str]:
     return [t for t in text.split(",") if t.strip()]
 
 
+def _keys(text: str) -> list[str]:
+    return [k.strip().lower() for k in text.split(",") if k.strip()]
+
+
 # Search mode `search` uses unless --mode is given, chosen by the retrieval benchmark
 # (docs/retrieval.md).
 DEFAULT_SEARCH_MODE = "rerank"
@@ -1483,7 +1502,13 @@ def _choices(*allowed: str) -> Callable[[str], list[str]]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="talk-is-cheap")
+    parser = argparse.ArgumentParser(
+        prog="talk-is-cheap",
+        description="What executives say in public, compared with what actually happened: "
+        "claims from interviews and press statements, a resolution rule fixed up front, "
+        "verdicts from later filings and news, and track records per executive; with "
+        "formal guidance against results, a question-answering agent and filing search.",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -1538,12 +1563,93 @@ def build_parser() -> argparse.ArgumentParser:
     article_text.add_argument(
         "--limit", type=int, help="fetch at most this many articles (newest stories first)"
     )
+    article_text.add_argument(
+        "--recovered-only",
+        action="store_true",
+        help="only Google News stories whose publisher URL was found on Finnhub",
+    )
+    article_text.add_argument(
+        "--finnhub",
+        action="store_true",
+        help="only stories found by `ingest finnhub` whose headline or summary names the "
+        "company or an executive with an attribution or claim word (the claim words of "
+        "archives.yaml), oldest first; prints how many pass per company",
+    )
+    article_text.add_argument(
+        "--dry-run", action="store_true", help="with --finnhub: print the counts, fetch nothing"
+    )
+    article_text.add_argument(
+        "--slow",
+        action="store_true",
+        help="one request every 10 seconds per host: for hosts paused after interstitials",
+    )
+    article_text.add_argument(
+        "--common-crawl",
+        action="store_true",
+        help="instead of fetching live: look up the Common Crawl copy of articles whose "
+        "live page is gone (404, 410) or had no text, never of refusals (robots.txt, 401, "
+        "403, 405, paywalls, interstitials), newest crawls first; reports what it recovers "
+        "per domain",
+    )
+
+    archives = sources.add_parser(
+        "archives",
+        help="past articles of the publishers in archives.yaml, from Common Crawl and the "
+        "Wayback Machine (resumable)",
+    )
+    archives.add_argument(
+        "--publishers", type=_keys, help="comma-separated keys from archives.yaml (default: all)"
+    )
+    archives.add_argument("--tickers", type=_tickers, help=_TICKERS_HELP)
+    archives.add_argument(
+        "--since",
+        type=date.fromisoformat,
+        help="earliest publication date (default: history_start of universe.yaml)",
+    )
+    archives.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="search the indexes and print the URLs found per publisher, company and year; "
+        "download nothing",
+    )
+    archives.add_argument("--limit", type=int, help="download at most this many captures")
+
+    finnhub = sources.add_parser(
+        "finnhub",
+        help="Finnhub company news: publisher links for Google News stories, and new "
+        "stories (needs FINNHUB_API_KEY)",
+    )
+    finnhub.add_argument("--tickers", type=_tickers, help=_TICKERS_HELP)
+    finnhub.add_argument(
+        "--since",
+        type=date.fromisoformat,
+        help="earliest date to ask for (default: history_start of universe.yaml)",
+    )
+    finnhub.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fetch and match, print what would be stored, and store nothing",
+    )
 
     commands.add_parser("companies", help="list loaded companies")
 
+    sourced = commands.add_parser(
+        "sources",
+        help="articles and stories per news source (RSS, GDELT, Common Crawl, Wayback, "
+        "Finnhub); --report: what only each source found",
+    )
+    sourced.add_argument(
+        "--report",
+        action="store_true",
+        help="per source, counting only stories no other source found: articles linked, "
+        "stories with text, management claims and due claims",
+    )
+
     feeds = commands.add_parser("feeds", help="health of every polled news feed")
     feeds.add_argument(
-        "--backfill", action="store_true", help="progress of backfill sources (GDELT) instead"
+        "--backfill",
+        action="store_true",
+        help="progress of backfill sources (GDELT, Finnhub, the web archives) instead",
     )
 
     company_news = commands.add_parser(
@@ -1747,9 +1853,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="only stories never extracted; keep those extracted with another model",
     )
     statements_extract.add_argument(
+        "--max-stories",
+        type=int,
+        default=500,
+        help="at most this many stories needing a model call, across companies, ranked: "
+        "an executive quoted with a forward-looking word first, then stories older than "
+        "six months, then companies with fewer than 15 management claims (default 500)",
+    )
+    statements_extract.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the candidates, calls, tokens and cost a run would take, and make no call",
+        help="print the candidates per company and publisher, how many --max-stories "
+        "keeps, the calls, tokens and cost a run would take, and make no call",
+    )
+    statements_extract.add_argument(
+        "--check-budget",
+        action="store_true",
+        help="make no call (exit 3) when the estimate exceeds what is left of LLM_BUDGET_USD",
     )
 
     commands.add_parser(
@@ -1846,6 +1966,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print the calls and cost, and make no call"
     )
     promised.add_argument(
+        "--check-budget",
+        action="store_true",
+        help="with `frame` and `resolve`: make no call (exit 3) when the typical cost "
+        "exceeds what is left of LLM_BUDGET_USD",
+    )
+    promised.add_argument(
         "--missing-only",
         action="store_true",
         help="with `frame`: only claims without a promise of any version",
@@ -1933,7 +2059,38 @@ def _run(args: argparse.Namespace) -> int:
         case "ingest" if args.source == "article-text":
             from talk_is_cheap.statements.commands import article_text_command
 
-            return asyncio.run(article_text_command(args.tickers, args.limit))
+            if args.finnhub and args.recovered_only:
+                print("--finnhub and --recovered-only are exclusive", file=sys.stderr)
+                return 2
+            if args.dry_run and not args.finnhub:
+                print("--dry-run only goes with --finnhub", file=sys.stderr)
+                return 2
+            return asyncio.run(
+                article_text_command(
+                    args.tickers,
+                    args.limit,
+                    args.recovered_only,
+                    args.finnhub,
+                    args.dry_run,
+                    args.slow,
+                    args.common_crawl,
+                )
+            )
+        case "ingest" if args.source == "archives":
+            from talk_is_cheap.news.commands import archives_command
+
+            if args.limit is not None and args.limit < 1:
+                print("--limit must be 1 or more", file=sys.stderr)
+                return 2
+            return asyncio.run(
+                archives_command(
+                    args.publishers, args.tickers, args.since, args.dry_run, args.limit
+                )
+            )
+        case "ingest" if args.source == "finnhub":
+            from talk_is_cheap.news.commands import finnhub_command
+
+            return asyncio.run(finnhub_command(args.tickers, args.since, args.dry_run))
         case "ingest" if args.source == "news" and args.reprocess:
             if args.backfill or args.tickers or args.since or args.until:
                 print("--reprocess takes no other options", file=sys.stderr)
@@ -1968,6 +2125,10 @@ def _run(args: argparse.Namespace) -> int:
             return asyncio.run(_ingest_filings(args.tickers))
         case "companies":
             return asyncio.run(_companies())
+        case "sources":
+            from talk_is_cheap.sources import sources_command
+
+            return asyncio.run(sources_command(args.report))
         case "coverage":
             return asyncio.run(_coverage(args.tickers))
         case "show":
@@ -2018,7 +2179,13 @@ def _run(args: argparse.Namespace) -> int:
 
             return asyncio.run(
                 extract_command(
-                    args.tickers, args.limit, args.dry_run, args.missing_only, args.model
+                    args.tickers,
+                    args.limit,
+                    args.dry_run,
+                    args.missing_only,
+                    args.model,
+                    args.max_stories,
+                    args.check_budget,
                 )
             )
         case "extract":
@@ -2091,12 +2258,18 @@ def _promises(args: argparse.Namespace) -> int:
                     args.model,
                     args.promises,
                     args.upgrade,
+                    args.check_budget,
                 )
             )
         case "resolve":
             return asyncio.run(
                 commands.resolve_command(
-                    args.tickers, args.limit, args.dry_run, args.due_only, args.model
+                    args.tickers,
+                    args.limit,
+                    args.dry_run,
+                    args.due_only,
+                    args.model,
+                    args.check_budget,
                 )
             )
         case "show":

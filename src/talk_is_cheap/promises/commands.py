@@ -40,6 +40,7 @@ async def frame_command(
     model: str | None,
     promise_ids: Sequence[int] | None = None,
     upgrade: bool = False,
+    check_budget: bool = False,
 ) -> int:
     from talk_is_cheap.guidance.llm import (
         CacheOnlyModel,
@@ -63,7 +64,7 @@ async def frame_command(
         plan_framing,
     )
     from talk_is_cheap.promises.schema import FramingAnswer
-    from talk_is_cheap.spend import budget_line, command_budget
+    from talk_is_cheap.spend import budget_line, command_budget, over_budget
     from talk_is_cheap.statements.extract import calendars
 
     settings = get_settings()
@@ -111,6 +112,8 @@ async def frame_command(
         print(budget_line(budget), flush=True)
         if dry:
             return 0
+        if check_budget and over_budget(budget, typical, "framing"):
+            return 3
         if plan.calls and pricing is None:
             print(f"no price known for {label}: set LLM_INPUT_PRICE and LLM_OUTPUT_PRICE")
             return 1
@@ -168,6 +171,7 @@ async def resolve_command(
     dry: bool,
     due_only: bool,
     model: str | None,
+    check_budget: bool = False,
 ) -> int:
     from talk_is_cheap.agent.tools import ToolContext
     from talk_is_cheap.guidance.llm import (
@@ -192,7 +196,7 @@ async def resolve_command(
     )
     from talk_is_cheap.promises.schema import EvidencePlan, Judgment
     from talk_is_cheap.retrieval.encoders import load_embedder, load_reranker
-    from talk_is_cheap.spend import budget_line, command_budget
+    from talk_is_cheap.spend import budget_line, command_budget, over_budget
     from talk_is_cheap.statements.extract import calendars
 
     settings = get_settings()
@@ -247,6 +251,8 @@ async def resolve_command(
         print(budget_line(budget), flush=True)
         if dry or not plan.claims:
             return 0
+        if check_budget and over_budget(budget, typical, "resolution"):
+            return 3
         if pricing is None:
             print(f"no price known for {label}: set LLM_INPUT_PRICE and LLM_OUTPUT_PRICE")
             return 1

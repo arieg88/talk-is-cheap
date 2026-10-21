@@ -309,3 +309,44 @@ def test_two_claims_quoting_one_sentence_go_to_the_labels_of_their_figures() -> 
     ]
     score = score_story(LabeledStory("s", "NVDA", "u", labels), claims)
     assert score.leaks == [] and score.attributed_management == 1
+
+
+def test_stories_quoting_an_executive_on_the_future_come_first_then_older_then_thin() -> None:
+    from datetime import UTC, datetime
+
+    from talk_is_cheap.statements.candidates import (
+        Candidate,
+        StoryText,
+        quotes_executive_forward,
+    )
+    from talk_is_cheap.statements.extract import PlannedStory, priority
+    from talk_is_cheap.universe import Executive, UniverseCompany
+
+    company = UniverseCompany(
+        ticker="TICA", name="Ticacorp", executives=[Executive(name="Ann Lee", role="CEO")]
+    )
+    quoted = 'Ann Lee spoke on Tuesday.\n"We will double output next year," she said.'
+    reported = "Ann Lee said demand was strong. Ticacorp expects more orders next year."
+    assert quotes_executive_forward(quoted, company)
+    assert not quotes_executive_forward(reported, company)  # forward-looking, not quoted
+    assert not quotes_executive_forward('"We will grow," a spokesman said.', company)
+
+    def planned(text: str, day: date, article_id: int) -> PlannedStory:
+        story = StoryText(
+            article_id, article_id, "t", text, "article", None, "u",
+            datetime(day.year, day.month, day.day, tzinfo=UTC),
+        )  # fmt: skip
+        return PlannedStory(Candidate("TICA", story), "p", "h", "call", "m")
+
+    today = date(2026, 10, 21)
+    stories = {
+        "quoted, recent": planned(quoted, date(2026, 10, 1), 1),
+        "reported, old": planned(reported, date(2025, 1, 5), 2),
+        "reported, recent": planned(reported, date(2026, 9, 1), 3),
+    }
+    thin = sorted(stories, key=lambda k: priority(stories[k], company, 3, today))
+    assert thin == ["quoted, recent", "reported, old", "reported, recent"]
+    # Coverage only breaks ties between stories otherwise alike.
+    covered = priority(stories["reported, old"], company, 40, today)
+    assert priority(stories["reported, old"], company, 3, today) < covered
+    assert covered < priority(stories["reported, recent"], company, 3, today)

@@ -228,14 +228,15 @@ class Feed(Base):
 
 
 class Article(Base):
-    """A news item's metadata, stored once per canonical URL. Full articles are never
-    stored. Near-duplicate headlines share a `cluster_id` (the id of the cluster's first
-    article)."""
+    """A news item's metadata, stored once per canonical URL. Near-duplicate headlines
+    share a `cluster_id` (the id of the cluster's first article). A Google News story
+    matched to the publisher's own link (`news/finnhub.py`) keeps its URL and gains
+    `publisher_url`, which `ingest article-text` fetches instead."""
 
     __tablename__ = "articles"
     __table_args__ = (
         CheckConstraint(
-            "time_precision IN ('published', 'seen', 'fetched')", name="time_precision"
+            "time_precision IN ('published', 'date', 'seen', 'fetched')", name="time_precision"
         ),
         Index("ix_articles_published_at", "published_at"),
         Index("ix_articles_cluster_id", "cluster_id"),
@@ -253,6 +254,10 @@ class Article(Base):
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    publisher_url: Mapped[str | None] = mapped_column(Text)
+    # rapidfuzz title similarity (0-100) of the match that supplied `publisher_url`
+    publisher_url_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    publisher_url_source: Mapped[str | None] = mapped_column(String(16))  # finnhub
 
 
 class ArticleFeed(Base):
@@ -313,6 +318,69 @@ class BackfillWindow(Base):
     completed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ArchiveSearch(Base):
+    """One search of a web archive's index for a publisher (`news/archives.py`): a
+    Common Crawl crawl, or a Wayback Machine month or prefix. Progress is recorded as
+    each page is stored; a complete search is skipped by a re-run."""
+
+    __tablename__ = "archive_searches"
+    __table_args__ = (
+        UniqueConstraint("publisher", "source", "period", "prefix", name="uq_archive_searches"),
+        CheckConstraint("source IN ('commoncrawl', 'wayback')", name="source"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    publisher: Mapped[str] = mapped_column(String(32))  # archives.yaml key
+    source: Mapped[str] = mapped_column(String(16))
+    period: Mapped[str] = mapped_column(String(32))  # CC-MAIN-2024-22, 2024-05, or "all"
+    prefix: Mapped[str] = mapped_column(Text)
+    requests: Mapped[int] = mapped_column(Integer)
+    captures: Mapped[int] = mapped_column(Integer)  # rows the index returned
+    kept: Mapped[int] = mapped_column(Integer)  # captures of URLs that passed the slug filter
+    # Months of the article URLs found, passing the filter or not ("2024-05"): by the
+    # URL's date, else the capture's.
+    months: Mapped[list[str]] = mapped_column(JSONB)
+    # Common Crawl index pages of the search, and how many are stored: a search is
+    # recorded page by page, and resumes at the first page not done.
+    pages: Mapped[int | None] = mapped_column(Integer)
+    pages_done: Mapped[int] = mapped_column(Integer, server_default="0")
+    complete: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    searched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ArchiveCapture(Base):
+    """The one archived capture chosen for an article URL that passed the slug filter,
+    and what became of it."""
+
+    __tablename__ = "archive_captures"
+    __table_args__ = (
+        CheckConstraint("source IN ('commoncrawl', 'wayback')", name="source"),
+        CheckConstraint("status IN ('pending', 'stored', 'unavailable', 'skipped')", name="status"),
+        Index("ix_archive_captures_publisher_status", "publisher", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    url_hash: Mapped[str] = mapped_column(String(64), unique=True)  # of the canonical URL
+    url: Mapped[str] = mapped_column(Text)  # the canonical publisher URL
+    publisher: Mapped[str] = mapped_column(String(32))
+    source: Mapped[str] = mapped_column(String(16))
+    captured_url: Mapped[str] = mapped_column(Text)  # as the archive holds it
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Common Crawl: the WARC record.
+    warc_filename: Mapped[str | None] = mapped_column(Text)
+    warc_offset: Mapped[int | None] = mapped_column(BigInteger)
+    warc_length: Mapped[int | None] = mapped_column(Integer)
+    url_date: Mapped[date | None] = mapped_column(Date)  # from the URL, when it has one
+    tickers: Mapped[list[str]] = mapped_column(JSONB)  # companies the slug names
+    status: Mapped[str] = mapped_column(String(16), server_default="pending")
+    reason: Mapped[str | None] = mapped_column(Text)
+    article_id: Mapped[int | None] = mapped_column(ForeignKey("articles.id", ondelete="SET NULL"))
+    found_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Chunk(Base):
@@ -901,6 +969,9 @@ class Promise(Base):
             name="comparison_basis",
         ),
         CheckConstraint("claim_type IN ('promise', 'scheduled_action')", name="claim_type"),
+        CheckConstraint(
+            "subject_kind IN ('company', 'index', 'sector', 'macro')", name="subject_kind"
+        ),
         Index("ix_promises_ticker_current", "ticker", "current"),
         Index("ix_promises_group_key", "group_key"),
     )
@@ -918,6 +989,11 @@ class Promise(Base):
     statement_date: Mapped[date] = mapped_column(Date)
     quote: Mapped[str] = mapped_column(Text)
     subject: Mapped[str] = mapped_column(Text)
+    # What the claim is about, for the outcome source that resolves it
+    # (`promises/outcomes.py`): a company (`subject_key` is its ticker), or an index, a
+    # sector or a macro series (its identifier).
+    subject_kind: Mapped[str] = mapped_column(String(16), server_default="company")
+    subject_key: Mapped[str | None] = mapped_column(String(32))
     metric: Mapped[str | None] = mapped_column(String(32))
     measure_period: Mapped[str | None] = mapped_column(String(8))  # quarter, year
     target_kind: Mapped[str | None] = mapped_column(String(16))

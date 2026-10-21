@@ -201,7 +201,7 @@ Netflix 10-for-1 (November 17, 2025).
   version, tokens and cost, including calls whose answer could not be used. Cached
   responses cost nothing and are not recorded. `talk-is-cheap spend` shows the total
   against the budget, and spending per command and per model.
-- **Total budget.** `LLM_BUDGET_USD` (default $2.50) caps everything the ledger counts.
+- **Total budget.** `LLM_BUDGET_USD` (default $3.00) caps everything the ledger counts.
   A call whose estimated cost could take the total over it is refused before it is made,
   with a message showing what was spent and what remains; the run keeps what it did
   before. Spending from before the ledger is recorded as notes that do not count: $5.22
@@ -258,7 +258,7 @@ and 1.000: run-to-run variation is a few points for Haiku and Sonnet.
 By accuracy, Opus 5.5 is best: the best overall F1 in both runs, every numeric
 statement found with the right basis both times, and the fewest conditions on the wrong
 item. **The default is `claude-haiku-5-5`**, chosen for the project's budget
-(`LLM_BUDGET_USD` $2.50): it gets every figure exact and 98% of numeric statements
+(`LLM_BUDGET_USD`, then $2.50): it gets every figure exact and 98% of numeric statements
 (F1 0.981) at one thirtieth of Opus's cost, $0.0015 a document; its weaker points are
 qualitative items (F1 0.80) and extra items. Opus stays available with `--model
 claude-opus-5-5`.

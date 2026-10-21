@@ -77,6 +77,7 @@ from talk_is_cheap.promises.checks import (
     key_terms,
 )
 from talk_is_cheap.promises.framing import NUMERIC_KINDS, covering_period
+from talk_is_cheap.promises.outcomes import has_series, outcome_request, subject_of
 from talk_is_cheap.promises.schema import EvidencePlan, Judgment
 from talk_is_cheap.universe import Universe
 
@@ -109,16 +110,6 @@ JUDGE_EVIDENCE_CHARS = MAX_TOOL_CALLS * SEARCH_K * (JUDGE_TEXT_CHARS + 200)
 # reported results. Earnings releases come a few days earlier, so evidence from a release
 # is always on time.
 COVERING_DOCS = ("10q", "10k")
-# Reported metrics behind each promise metric, for `get_actuals`.
-ACTUAL_METRICS: Mapping[str, list[str]] = {
-    "revenue": ["revenue"],
-    "operating_income": ["operating_income"],
-    "operating_expenses": ["operating_expenses"],
-    "capex": ["capex"],
-    "eps": ["eps_diluted"],
-    "gross_margin": ["gross_profit", "revenue"],
-    "operating_margin": ["operating_income", "revenue"],
-}
 
 
 def prompt_version() -> str:
@@ -430,31 +421,25 @@ def tool_calls(
     fiscal: FiscalCalendar | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """The plan as at most MAX_TOOL_CALLS calls, each limited to evidence dated after the
-    statement: the metric's periods (always with the period the due date closes), the
+    statement: the subject's measured outcome for the metric's periods, from the source
+    registered for its kind (`outcomes.py`; always with the period the due date
+    closes), the
     company's later filings, news and later statements; then one search per related
     company it names (its filings when it is covered, else news about it), with its own
     RELATED_K results."""
     after = (promise.statement_date + timedelta(days=1)).isoformat()
     calls: list[tuple[str, dict[str, Any]]] = []
-    if promise.metric is not None and promise.metric in ACTUAL_METRICS:
+    subject = subject_of(promise)
+    if has_series(subject):
         periods = list(plan.actuals_periods[:4])
         if promise.due_date is not None and fiscal is not None:
             year, quarter = covering_period(fiscal, promise.due_date, promise.measure_period)
             target = f"FY{year}" if quarter is None else f"FY{year}Q{quarter}"
             if target not in periods:
                 periods = [target, *periods][:4]
-        if periods:
-            calls.append(
-                (
-                    "get_actuals",
-                    {
-                        "ticker": promise.ticker,
-                        "metrics": ACTUAL_METRICS[promise.metric],
-                        "periods": periods,
-                        "vintage": "first",
-                    },
-                )
-            )
+        outcome = outcome_request(subject, periods)
+        if outcome is not None:
+            calls.append(outcome)
 
     def filings(query: str, ticker: str | None) -> tuple[str, dict[str, Any]]:
         arguments: dict[str, Any] = {"query": query, "date_from": after, "k": SEARCH_K}

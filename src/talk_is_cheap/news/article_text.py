@@ -2,19 +2,29 @@
 
 Feeds give headlines and short summaries; executives' quotes are in the article body. This
 fetches the body of one article per dedup cluster linked to a company (confidence 0.5 or
-more), and stores it in `article_texts` for extraction and grounding only.
+more), and stores it in `article_texts` for extraction and grounding only. A Google News
+article whose publisher URL was found (`news/finnhub.py`) is fetched from that URL.
+Archived articles (`news/archives.py`) arrive with their text already stored.
 
 Rules for every request:
 
-- robots.txt of the host is read first (once per run) and obeyed for the first word of
-  ARTICLE_USER_AGENT; a host whose robots.txt cannot be read is not fetched. Redirects
-  are followed one hop at a time, each checked against its own host's robots.txt.
+- robots.txt of the host is read first and obeyed for the first word of
+  ARTICLE_USER_AGENT; it is kept on disk for a day (`ROBOTS_TTL`), so a URL robots.txt
+  refuses is skipped without any request. A host whose robots.txt cannot be read is not
+  fetched. Redirects are followed one hop at a time, each checked against its own host's
+  robots.txt. A Finnhub link is resolved first (one request to finnhub.io) and the
+  publisher URL stored on the article (`publisher_url`), so the publisher's own rules,
+  pacing and queue apply.
 - At most one request per second per host (`MIN_INTERVAL`, or the host's Crawl-delay
-  when longer), a 15-second timeout, and a descriptive User-Agent.
-- No retries within a run. 401, 402, 403, 404, 410 and 451, robots.txt refusals and pages
-  without article text (paywalls, script-rendered pages) are recorded as `unavailable`
-  for good; timeouts, connection errors and server errors are recorded as `unavailable`
-  and tried again by the next run.
+  when longer; `--slow`: SLOW_INTERVAL), at most HOSTS_AT_ONCE requests at a time, a
+  15-second timeout, and a descriptive User-Agent.
+- No retries within a run. 401, 402, 403, 404, 410 and 451, robots.txt refusals,
+  paywalls (Seeking Alpha's 403 is its paywall) and pages without article text are
+  recorded as `unavailable` for good. Timeouts, connection errors, server errors and
+  interstitials (a consent page, or HTTP 202 with an empty body: a bot check) are tried
+  again by the next run. A host that answers PAUSE_AFTER interstitials in a row is paused
+  for the rest of the run, its other articles left for a later, slower run, while the
+  other hosts continue.
 
 Runs are incremental and resumable: each result is stored as soon as it arrives, a
 cluster with text is skipped, and a cluster whose best article is unavailable moves on to
@@ -23,16 +33,18 @@ its next article.
 
 import asyncio
 import hashlib
+import json
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -55,7 +67,25 @@ PAYWALL_MARKERS = (
     "create a free account to continue",
 )
 # Reasons that a later run tries again; every other unavailable article is final.
-RETRYABLE_REASONS = ("timeout", "connection error", "server error", "robots.txt unreadable")
+RETRYABLE_REASONS = (
+    "timeout",
+    "connection error",
+    "server error",
+    "robots.txt unreadable",
+    "interstitial",
+)
+# robots.txt answers are kept on disk this long.
+ROBOTS_TTL = timedelta(days=1)
+# `--slow`: seconds between two requests to one host, for hosts paused by interstitials.
+SLOW_INTERVAL = 10.0
+# Interstitials in a row after which a host is paused for the rest of the run.
+PAUSE_AFTER = 3
+# Hosts whose HTTP 403 is a paywall for subscribers, not a refusal of the request.
+PAYWALL_403_HOSTS = frozenset({"seekingalpha.com"})
+# Hosts of interstitial consent pages a redirect can lead to.
+CONSENT_HOST_PREFIXES = ("consent.", "guce.")
+# Links that redirect to the publisher (`news/finnhub.py`).
+RESOLVED_HOSTS = frozenset({"finnhub.io"})
 
 
 def retryable(reason: str | None) -> bool:
@@ -75,10 +105,12 @@ class Candidate:
 @dataclass(frozen=True, slots=True)
 class Fetched:
     article_id: int
-    status: str  # ok or unavailable
+    status: str  # ok, unavailable, or paused (not stored: its host is paused)
     reason: str | None = None
     http_status: int | None = None
     text: str | None = None
+    # The page as fetched, for callers that also read its metadata; never stored.
+    html: str | None = None
 
 
 @dataclass(slots=True)
@@ -86,6 +118,8 @@ class PublisherCount:
     fetched: int = 0
     unavailable: int = 0
     skipped: int = 0
+    robots: int = 0  # refused by robots.txt, without a request for the page
+    paused: int = 0
     reasons: Counter[str] = field(default_factory=Counter)
 
 
@@ -95,33 +129,47 @@ class FetchSummary:
     by_publisher: dict[str, PublisherCount] = field(
         default_factory=lambda: defaultdict(PublisherCount)
     )
+    paused_hosts: set[str] = field(default_factory=set)
     requests: int = 0
     seconds: float = 0.0
 
     def total(self, name: str) -> int:
         return sum(getattr(c, name) for c in self.by_publisher.values())
 
+    @property
+    def success_rate(self) -> float | None:
+        """Fetched, of the articles requested: robots.txt refusals (never requested) and
+        paused hosts are left out."""
+        tried = self.total("fetched") + self.total("unavailable") - self.total("robots")
+        return self.total("fetched") / tried if tried else None
+
 
 async def plan(
-    session: AsyncSession, tickers: Sequence[str] | None = None, limit: int | None = None
+    session: AsyncSession,
+    tickers: Sequence[str] | None = None,
+    limit: int | None = None,
+    recovered_only: bool = False,
 ) -> tuple[list[Candidate], dict[str, int], int]:
     """The articles to fetch, one per linked cluster without text: the cluster's best
-    article not yet found unavailable for good. Best is a direct link (Google News links
-    are redirects its robots.txt forbids following), then the longest summary, then the
-    earliest. Returns the candidates (newest first, at most `limit`), the clusters skipped
-    per publisher (text already stored, or no article left to try), and the number of
-    linked clusters."""
+    article not yet found unavailable for good. An article's link is its publisher URL
+    when one was found for it (`news/finnhub.py`), else its own. Best is a direct link
+    (Google News links are redirects its robots.txt forbids following), then the
+    longest summary, then the earliest. Returns the candidates (newest first, at most
+    `limit`), the clusters skipped per publisher (text already stored, or no article
+    left to try), and the number of linked clusters."""
     cluster = func.coalesce(Article.cluster_id, Article.id)
     linked = select(ArticleCompany.article_id).where(ArticleCompany.confidence >= MIN_CONFIDENCE)
     if tickers:
         linked = linked.where(ArticleCompany.ticker.in_([t.upper() for t in tickers]))
     clusters = select(cluster.label("cluster")).where(Article.id.in_(linked)).distinct()
+    if recovered_only:
+        clusters = clusters.where(Article.publisher_url.is_not(None))
     rows = (
         await session.execute(
             select(
                 cluster.label("cluster"),
                 Article.id,
-                Article.url,
+                func.coalesce(Article.publisher_url, Article.url),
                 Article.publisher,
                 Article.summary,
                 Article.published_at,
@@ -182,11 +230,16 @@ class HostRules:
         agent: str,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], object] = asyncio.sleep,
+        *,
+        interval: float = MIN_INTERVAL,
+        robots_dir: Path | None = None,
     ) -> None:
         self._client = client
         self._agent = agent
         self._clock = clock
         self._sleep = sleep
+        self._min_interval = interval
+        self._robots_dir = robots_dir
         self._robots: dict[str, RobotFileParser | str] = {}
         self._last: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -211,14 +264,16 @@ class HostRules:
     def _interval(self, host: str) -> float:
         robots = self._robots.get(host)
         delay = robots.crawl_delay(self._agent) if isinstance(robots, RobotFileParser) else None
-        return max(MIN_INTERVAL, float(delay or 0))
+        return max(self._min_interval, float(delay or 0))
 
     async def allowed(self, url: str) -> str | None:
         """None when robots.txt allows the URL, else why not."""
         parts = urlsplit(url)
         host = parts.netloc.lower()
         if host not in self._robots:
-            self._robots[host] = await self._read_robots(f"{parts.scheme}://{parts.netloc}")
+            self._robots[host] = self._cached_robots(host) or await self._read_robots(
+                f"{parts.scheme}://{parts.netloc}"
+            )
         robots = self._robots[host]
         if isinstance(robots, str):
             return robots
@@ -226,7 +281,39 @@ class HostRules:
             return "robots.txt disallows"
         return None
 
+    def _robots_path(self, host: str) -> Path | None:
+        return None if self._robots_dir is None else self._robots_dir / f"{host}.json"
+
+    def _cached_robots(self, host: str) -> RobotFileParser | str | None:
+        """The robots.txt read within ROBOTS_TTL, from disk."""
+        path = self._robots_path(host)
+        if path is None or not path.exists():
+            return None
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if datetime.now(UTC) - datetime.fromisoformat(stored["read_at"]) > ROBOTS_TTL:
+            return None
+        if stored.get("refusal"):
+            return str(stored["refusal"])
+        parser = RobotFileParser()
+        parser.parse(stored["lines"])
+        return parser
+
     async def _read_robots(self, origin: str) -> RobotFileParser | str:
+        host = urlsplit(origin).netloc.lower()
+        found = await self._fetch_robots(origin)
+        path = self._robots_path(host)
+        lines = getattr(found, "_lines", None)
+        if path is not None and not (isinstance(found, str) and retryable(found)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stored = {
+                "read_at": datetime.now(UTC).isoformat(),
+                "refusal": found if isinstance(found, str) else None,
+                "lines": lines or [],
+            }
+            path.write_text(json.dumps(stored), encoding="utf-8")
+        return found
+
+    async def _fetch_robots(self, origin: str) -> RobotFileParser | str:
         parser = RobotFileParser()
         try:
             response = await self.get(f"{origin}/robots.txt")
@@ -241,10 +328,9 @@ class HostRules:
             return f"robots.txt disallows (HTTP {response.status_code} for robots.txt)"
         if response.status_code >= 500:
             return f"robots.txt unreadable (HTTP {response.status_code})"
-        if response.status_code >= 400:
-            parser.parse([])  # no robots.txt: everything is allowed
-        else:
-            parser.parse(response.text.splitlines())
+        lines = [] if response.status_code >= 400 else response.text.splitlines()
+        parser.parse(lines)  # no robots.txt (4xx): everything is allowed
+        parser._lines = lines  # type: ignore[attr-defined]  # kept for the disk cache
         return parser
 
 
@@ -269,18 +355,28 @@ async def fetch_article(rules: HostRules, candidate: Candidate) -> Fetched:
     else:
         return Fetched(candidate.article_id, "unavailable", "too many redirects")
     status = response.status_code
+    host = _host(url).removeprefix("www.")
+    if host.startswith(CONSENT_HOST_PREFIXES):
+        return Fetched(candidate.article_id, "unavailable", f"interstitial: consent page {host}")
+    if status == 202 and len(response.content.strip()) < MIN_TEXT_CHARS:
+        return Fetched(
+            candidate.article_id, "unavailable", "interstitial: HTTP 202, empty page", status
+        )
+    if status == 403 and host in PAYWALL_403_HOSTS:
+        return Fetched(candidate.article_id, "unavailable", f"paywall: HTTP 403 ({host})", status)
     if status in NEVER_RETRY_STATUS:
         return Fetched(candidate.article_id, "unavailable", f"HTTP {status}", status)
     if status >= 500 or status == 429:
         return Fetched(candidate.article_id, "unavailable", f"server error: HTTP {status}", status)
     if status >= 300:
         return Fetched(candidate.article_id, "unavailable", f"HTTP {status}", status)
-    text = await asyncio.to_thread(extract_text, response.text, url)
+    page = response.text
+    text = await asyncio.to_thread(extract_text, page, url)
     if text is None:
-        return Fetched(candidate.article_id, "unavailable", "no article text", status)
+        return Fetched(candidate.article_id, "unavailable", "no article text", status, html=page)
     if any(marker in text[-600:].lower() for marker in PAYWALL_MARKERS):
         return Fetched(candidate.article_id, "unavailable", "paywall", status)
-    return Fetched(candidate.article_id, "ok", None, status, text)
+    return Fetched(candidate.article_id, "ok", None, status, text, html=page)
 
 
 def extract_text(html: str, url: str) -> str | None:
@@ -324,6 +420,32 @@ async def store(sessions: async_sessionmaker[AsyncSession], fetched: Fetched) ->
         await session.execute(statement)
 
 
+async def resolve_link(rules: HostRules, url: str) -> str | None:
+    """Where a redirecting link (a Finnhub link) leads, by one request that does not
+    follow it; None when it leads nowhere."""
+    if await rules.allowed(url):
+        return None
+    try:
+        response = await rules.get(url)
+    except httpx.HTTPError:
+        return None
+    location = str(response.headers.get("location") or "")
+    if not response.is_redirect or not location:
+        return None
+    return urljoin(url, location)
+
+
+async def store_publisher_url(
+    sessions: async_sessionmaker[AsyncSession], article_id: int, url: str
+) -> None:
+    async with sessions() as session, session.begin():
+        await session.execute(
+            update(Article)
+            .where(Article.id == article_id)
+            .values(publisher_url=url, publisher_url_source="finnhub")
+        )
+
+
 async def fetch_texts(
     sessions: async_sessionmaker[AsyncSession],
     client: httpx.AsyncClient,
@@ -331,37 +453,91 @@ async def fetch_texts(
     *,
     tickers: Sequence[str] | None = None,
     limit: int | None = None,
+    recovered_only: bool = False,
+    selected: Sequence[Candidate] | None = None,
+    interval: float = MIN_INTERVAL,
+    robots_dir: Path | None = None,
     on_result: Callable[[Candidate, Fetched], None] | None = None,
 ) -> FetchSummary:
-    """Fetch the planned articles, hosts in parallel and each host in turn, storing every
-    result as it arrives."""
+    """Fetch the planned articles (or the `selected` ones, in their order): one queue per
+    host, hosts in parallel, at most HOSTS_AT_ONCE requests at a time, every result
+    stored as it arrives. Finnhub links are resolved first (their queue is finnhub.io)
+    and each article then joins its publisher's queue. A host that answers PAUSE_AFTER
+    interstitials in a row is paused: its remaining articles are left for a later run."""
     started = time.monotonic()
-    async with sessions() as session:
-        candidates, skipped, clusters = await plan(session, tickers, limit)
+    skipped: dict[str, int] = {}
+    if selected is not None:
+        candidates, clusters = list(selected), len(selected)
+    else:
+        async with sessions() as session:
+            candidates, skipped, clusters = await plan(session, tickers, limit, recovered_only)
     summary = FetchSummary(clusters=clusters)
     for publisher, count in skipped.items():
         summary.by_publisher[publisher].skipped += count
-    rules = HostRules(client, agent)
-    by_host: dict[str, list[Candidate]] = defaultdict(list)
-    for candidate in candidates:
-        by_host[urlsplit(candidate.url).netloc.lower()].append(candidate)
-    hosts = asyncio.Semaphore(HOSTS_AT_ONCE)
+    rules = HostRules(client, agent, interval=interval, robots_dir=robots_dir)
+    gate = asyncio.Semaphore(HOSTS_AT_ONCE)
+    queues: dict[str, asyncio.Queue[Candidate | None]] = {}
+    workers: list[asyncio.Task[None]] = []
+    strikes: Counter[str] = Counter()
 
-    async def run_host(queue: list[Candidate]) -> None:
-        async with hosts:
-            for candidate in queue:
+    def dispatch(candidate: Candidate) -> None:
+        host = _host(candidate.url).removeprefix("www.")
+        if host not in queues:
+            queues[host] = asyncio.Queue()
+            workers.append(asyncio.create_task(work(host)))
+        queues[host].put_nowait(candidate)
+
+    async def record(candidate: Candidate, fetched: Fetched, host: str) -> None:
+        count = summary.by_publisher[candidate.publisher]
+        if fetched.status == "paused":
+            count.paused += 1
+        else:
+            await store(sessions, fetched)
+            if fetched.status == "ok":
+                count.fetched += 1
+            else:
+                count.unavailable += 1
+                count.reasons[_reason_kind(fetched.reason)] += 1
+                if (fetched.reason or "").startswith("robots.txt"):
+                    count.robots += 1
+            if (fetched.reason or "").startswith("interstitial"):
+                strikes[host] += 1
+                if strikes[host] >= PAUSE_AFTER:
+                    summary.paused_hosts.add(host)
+            else:
+                strikes[host] = 0
+        if on_result is not None:
+            on_result(candidate, fetched)
+
+    async def work(host: str) -> None:
+        queue = queues[host]
+        while (candidate := await queue.get()) is not None:
+            if host in summary.paused_hosts:
+                await record(candidate, Fetched(candidate.article_id, "paused", host), host)
+                continue
+            async with gate:
                 fetched = await fetch_article(rules, candidate)
-                await store(sessions, fetched)
-                count = summary.by_publisher[candidate.publisher]
-                if fetched.status == "ok":
-                    count.fetched += 1
-                else:
-                    count.unavailable += 1
-                    count.reasons[_reason_kind(fetched.reason)] += 1
-                if on_result is not None:
-                    on_result(candidate, fetched)
+            await record(candidate, fetched, host)
 
-    await asyncio.gather(*(run_host(queue) for queue in by_host.values()))
+    async def resolve(links: list[Candidate]) -> None:
+        for candidate in links:
+            async with gate:
+                url = await resolve_link(rules, candidate.url)
+            if url is not None:
+                await store_publisher_url(sessions, candidate.article_id, url)
+                candidate = Candidate(
+                    candidate.article_id, candidate.cluster_id, url, candidate.publisher
+                )
+            dispatch(candidate)
+
+    links = [c for c in candidates if _host(c.url) in RESOLVED_HOSTS]
+    for candidate in candidates:
+        if _host(candidate.url) not in RESOLVED_HOSTS:
+            dispatch(candidate)
+    await resolve(links)
+    for queue in queues.values():
+        queue.put_nowait(None)
+    await asyncio.gather(*workers)
     summary.requests = rules.requests
     summary.seconds = time.monotonic() - started
     return summary

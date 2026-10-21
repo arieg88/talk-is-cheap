@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from talk_is_cheap.db.models import (
@@ -25,8 +25,20 @@ DEFAULT_MIN_CONFIDENCE = Decimal("0.5")
 EARNINGS_WINDOW = timedelta(hours=48)
 # A feed with no new item for this long is stale.
 STALE_AFTER = timedelta(hours=72)
-# Feed types that are backfill sources, not polled feeds (news/gdelt.py).
-BACKFILL_TYPES = frozenset({"gdelt"})
+# Where an article's text was read, for citing it: the publisher URL found for a Google
+# News story (`finnhub.py`), which may be another outlet's version of the story, and that
+# site; else the article's own link and publisher.
+ARTICLE_LINK = func.coalesce(Article.publisher_url, Article.url)
+ARTICLE_PUBLISHER = case(
+    (
+        Article.publisher_url.is_not(None),
+        func.substring(Article.publisher_url, r"^https?://(?:www\.)?([^/:]+)"),
+    ),
+    else_=Article.publisher,
+)
+# Feed types that are backfill sources, not polled feeds (news/gdelt.py, news/archives.py,
+# news/finnhub.py).
+BACKFILL_TYPES = frozenset({"gdelt", "commoncrawl", "wayback", "finnhub"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +58,7 @@ class StoryLine:
 @dataclass(frozen=True, slots=True)
 class BackfillSource:
     key: str
-    windows: int  # weeks fully fetched
+    windows: int  # windows fully fetched
     first_window: datetime | None
     last_window: datetime | None  # end of the latest fetched week
     articles: int
@@ -162,7 +174,7 @@ async def earnings_window(
 
 
 async def backfill_progress(session: AsyncSession) -> list[BackfillSource]:
-    """Each backfill source: the weeks fetched, the range they cover, and its health."""
+    """Each backfill source: the windows fetched, the range they cover, and its health."""
     windows = (
         select(
             BackfillWindow.feed_id,

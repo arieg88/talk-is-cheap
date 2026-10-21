@@ -47,6 +47,7 @@ from talk_is_cheap.guidance.llm import (
     load_prompt_file,
 )
 from talk_is_cheap.guidance.matching import Actuals, load_actuals
+from talk_is_cheap.news.queries import ARTICLE_PUBLISHER
 from talk_is_cheap.promises.framing import (
     PROCESSING_VERSION,
     ClaimInput,
@@ -184,7 +185,7 @@ async def claims_to_frame(
     role."""
     rows = (
         await session.execute(
-            select(Statement, StatementOutcome, Article.published_at, Article.publisher)
+            select(Statement, StatementOutcome, Article.published_at, ARTICLE_PUBLISHER)
             .join(Article, Article.id == Statement.article_id)
             .outerjoin(StatementOutcome, StatementOutcome.statement_id == Statement.id)
             .where(Statement.ticker == company.ticker, Statement.management)
@@ -520,6 +521,9 @@ async def store_promise(
         statement_date=claim.statement_date,
         quote=claim.quote,
         subject=framed.subject,
+        # Management claims are about their company (`outcomes.py`).
+        subject_kind="company",
+        subject_key=claim.ticker,
         metric=framed.metric,
         measure_period=framed.measure_period,
         target_kind=framed.target_kind,

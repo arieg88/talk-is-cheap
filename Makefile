@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install db db-down db-reset migrate db-check ingest index extract eval-retrieval eval-guidance eval-statements eval-promises smoke-agent agent-graph lint format typecheck test test-unit check
+.PHONY: help install db db-down db-reset migrate db-check ingest index extract refresh-claims eval-retrieval eval-guidance eval-statements eval-promises smoke-agent agent-graph lint format typecheck test test-unit check
 
 help: ## List available commands
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -37,6 +37,13 @@ index: ## Chunk and embed new or changed filing text and news for search
 
 extract: ## Extract guidance from new or changed outlook sections and refresh verdicts (needs an LLM key unless cached)
 	uv run talk-is-cheap extract guidance
+
+MAX_STORIES ?= 500
+
+refresh-claims: ## After a news ingest: extract statements from new stories (MAX_STORIES=500 at most), frame new claims, resolve due ones. Stops before a paid stage whose estimate exceeds the budget left
+	uv run talk-is-cheap extract statements --missing-only --max-stories $(MAX_STORIES) --check-budget
+	uv run talk-is-cheap promises frame --missing-only --check-budget
+	uv run talk-is-cheap promises resolve --due-only --check-budget
 
 eval-retrieval: ## Recall and MRR of each search mode on evals/retrieval/questions.jsonl
 	uv run talk-is-cheap eval retrieval --details

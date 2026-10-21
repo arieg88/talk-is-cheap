@@ -553,7 +553,7 @@ async def test_paid_calls_go_to_the_ledger_and_the_budget_is_enforced(
 
     assert await asyncio.to_thread(main, ["spend"]) == 0
     out = capsys.readouterr().out
-    assert "LLM spending: $0.0210 of $2.50 budget" in out and "$2.4790 remaining" in out
+    assert "LLM spending: $0.0210 of $3.00 budget" in out and "$2.9790 remaining" in out
     assert "extract guidance" in out and "Not counted toward the budget" in out
     assert "old-model: $5.2000 (before the ledger)" in out
 

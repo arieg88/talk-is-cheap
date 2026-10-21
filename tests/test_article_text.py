@@ -1,6 +1,8 @@
 """Fetching article text: robots.txt, pacing, redirects, refusals and pages without an
 article. HTTP is mocked with respx; nothing leaves the machine."""
 
+from pathlib import Path
+
 import httpx
 import pytest
 import respx
@@ -148,3 +150,59 @@ async def test_an_unreadable_robots_txt_means_no_fetch_until_a_later_run() -> No
         fetched = await fetch_article(rules(client), candidate("https://news.example.com/a"))
     assert fetched.reason is not None and fetched.reason.startswith("robots.txt unreadable")
     assert retryable(fetched.reason) and not page.called
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("url", "answer", "reason", "again"),
+    [
+        # A bot check: 202 with an empty body. Tried again by a later run.
+        (
+            "https://news.example.com/a",
+            httpx.Response(202),
+            "interstitial: HTTP 202, empty page",
+            True,
+        ),
+        # A redirect to a consent page.
+        (
+            "https://news.example.com/a",
+            httpx.Response(302, headers={"Location": "https://consent.example.com/collect"}),
+            "interstitial: consent page consent.example.com",
+            True,
+        ),
+        # Seeking Alpha's 403 is its paywall: final.
+        (
+            "https://seekingalpha.com/a",
+            httpx.Response(403),
+            "paywall: HTTP 403 (seekingalpha.com)",
+            False,
+        ),
+    ],
+)
+async def test_interstitials_are_retried_later_and_a_paywall_403_never(
+    url: str, answer: httpx.Response, reason: str, again: bool
+) -> None:
+    respx.get(url__regex=r"https://[^/]+/robots\.txt").respond(404)
+    respx.get(url).mock(return_value=answer)
+    respx.get("https://consent.example.com/collect").respond(200, html="<p>Accept cookies</p>")
+    async with httpx.AsyncClient() as client:
+        fetched = await fetch_article(rules(client), candidate(url))
+    assert (fetched.status, fetched.reason) == ("unavailable", reason)
+    assert retryable(fetched.reason) is again
+
+
+@respx.mock
+async def test_robots_txt_is_kept_on_disk_so_a_refused_url_costs_no_request(
+    tmp_path: Path,
+) -> None:
+    robots = respx.get("https://news.example.com/robots.txt").respond(
+        200, text="User-agent: *\nDisallow: /private/\n"
+    )
+    page = respx.get("https://news.example.com/private/a").respond(200, html=ARTICLE)
+    async with httpx.AsyncClient() as client:
+        for _ in range(2):  # two runs
+            shared = HostRules(client, AGENT, robots_dir=tmp_path)
+            fetched = await fetch_article(shared, candidate("https://news.example.com/private/a"))
+            assert fetched.reason == "robots.txt disallows: news.example.com"
+    assert robots.call_count == 1 and not page.called
+    assert shared.requests == 0  # the second run read robots.txt from disk

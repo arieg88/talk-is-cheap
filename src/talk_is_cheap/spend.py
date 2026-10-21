@@ -69,6 +69,20 @@ def budget_line(budget: Budget) -> str:
     )
 
 
+def over_budget(budget: Budget, estimate: Decimal | None, what: str) -> bool:
+    """Whether a run's estimated cost exceeds what is left of the budget; says so when it
+    does (`--check-budget`, `make refresh-claims`)."""
+    assert budget.limit is not None
+    remaining = max(budget.limit - budget.total_spent, Decimal(0))
+    if estimate is None or estimate <= remaining:
+        return False
+    print(
+        f"not run: {what} is estimated at ${estimate:.4f}, more than the ${remaining:.4f} "
+        "left of LLM_BUDGET_USD"
+    )
+    return True
+
+
 async def counted_spend(session: AsyncSession) -> Decimal:
     """Total cost of the calls that count toward the budget."""
     total = await session.scalar(

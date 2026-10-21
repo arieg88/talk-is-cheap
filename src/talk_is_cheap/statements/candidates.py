@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from talk_is_cheap.db.models import Article, ArticleCompany, ArticleText
+from talk_is_cheap.news.queries import ARTICLE_LINK, ARTICLE_PUBLISHER
 from talk_is_cheap.statements.roster import roster_names
 from talk_is_cheap.universe import UniverseCompany
 
@@ -89,6 +90,28 @@ def passes_filter(text: str, company: UniverseCompany) -> bool:
     return False
 
 
+_QUOTED = re.compile(r"[\"“]([^\"“”]{12,}?)[\"”]")
+
+
+def quotes_executive_forward(text: str, company: UniverseCompany) -> bool:
+    """Whether one passage names an executive on the company's roster and holds a direct
+    quote with a forward-looking marker inside it: the stories most likely to hold a
+    claim an executive can be held to (`extract statements --max-stories` takes them
+    first)."""
+    names = roster_names(company)
+    if not names:
+        return False
+    speaker = re.compile("|".join(rf"\b{re.escape(n)}\b" for n in names))
+    paragraphs = [p for p in text.split("\n") if p.strip()]
+    for index in range(len(paragraphs)):
+        passage = "\n".join(paragraphs[index : index + 2])
+        if speaker.search(passage) and any(
+            _FORWARD.search(quote) for quote in _QUOTED.findall(passage)
+        ):
+            return True
+    return False
+
+
 async def stories(session: AsyncSession, tickers: Sequence[str]) -> dict[str, list[StoryText]]:
     """Per company, the text of every story linked to it: the longest text among the
     story's articles."""
@@ -112,8 +135,8 @@ async def stories(session: AsyncSession, tickers: Sequence[str]) -> dict[str, li
                 cluster,
                 Article.title,
                 Article.summary,
-                Article.publisher,
-                Article.url,
+                ARTICLE_PUBLISHER,
+                ARTICLE_LINK,
                 Article.published_at,
                 ArticleText.text,
             )

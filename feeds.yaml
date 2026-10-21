@@ -28,6 +28,47 @@ feeds:
     publisher: CNBC
     url: "https://www.cnbc.com/id/15839135/device/rss/rss.html"
 
+  # Technology and business press, where executives give interviews.
+  - type: rss
+    name: techcrunch
+    publisher: TechCrunch
+    url: "https://techcrunch.com/feed/"
+  - type: rss
+    name: the-verge
+    publisher: The Verge
+    url: "https://www.theverge.com/rss/index.xml"
+  - type: rss
+    name: ars-technica
+    publisher: Ars Technica
+    url: "https://feeds.arstechnica.com/arstechnica/index"
+  - type: rss
+    name: the-register
+    publisher: The Register
+    url: "https://www.theregister.com/headlines.atom"
+  - type: rss
+    name: toms-hardware
+    publisher: Tom's Hardware
+    url: "https://www.tomshardware.com/feeds/all"
+  - type: rss
+    name: fortune
+    publisher: Fortune
+    url: "https://fortune.com/feed/"
+
+  # Press release wires. None offers a feed per company without an account, so their
+  # technology feeds are polled and releases are linked by name (see docs/news.md).
+  - type: rss
+    name: business-wire-technology
+    publisher: Business Wire
+    url: "https://feed.businesswire.com/rss/home/?rss=G1QFDERJXkJeGVtRWA=="
+  - type: rss
+    name: globenewswire-semiconductors
+    publisher: GlobeNewswire
+    url: "https://www.globenewswire.com/RssFeed/industry/9576-Semiconductors/feedTitle/GlobeNewswire%20-%20Industry%20News%20on%20Semiconductors"
+  - type: rss
+    name: pr-newswire-technology
+    publisher: PR Newswire
+    url: "https://www.prnewswire.com/rss/technology-latest-news/technology-latest-news-list.rss"
+
   # Company newsrooms and investor-relations sites. Companies not listed publish no
   # reachable feed (see docs/news.md).
   - type: press_releases

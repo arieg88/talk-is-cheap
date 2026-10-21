@@ -58,6 +58,13 @@ class Settings(BaseSettings):
         "follows robots.txt, at most one request per second per site)"
     )
 
+    # Publisher archives searched by `ingest archives` (Common Crawl, Wayback Machine).
+    archives_file: Path = Path("archives.yaml")
+    # Every response of the archives and Finnhub, so nothing is fetched twice.
+    news_cache_dir: Path = Path(".cache/news")
+    # Finnhub company news (`ingest finnhub`); a free key from finnhub.io. Unset: skipped.
+    finnhub_api_key: SecretStr | None = None
+
     # Local models for search (fastembed). Changing the embedding model re-embeds
     # everything on the next `talk-is-cheap index`.
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -79,7 +86,7 @@ class Settings(BaseSettings):
     llm_cost_cap: Decimal = Field(default=Decimal("10.00"), ge=0)
     # Hard cap on all LLM spending recorded in the ledger (`talk-is-cheap spend`): a call
     # that could take the total over it is refused.
-    llm_budget_usd: Decimal = Field(default=Decimal("2.50"), ge=0)
+    llm_budget_usd: Decimal = Field(default=Decimal("3.00"), ge=0)
     # Prices in US dollars per million tokens, for models without a list price in
     # guidance/llm.py. Both or neither.
     llm_input_price: Decimal | None = None
@@ -104,6 +111,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "llm_api_key",
+        "finnhub_api_key",
         "llm_effort",
         "llm_input_price",
         "llm_output_price",

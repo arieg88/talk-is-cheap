@@ -640,7 +640,8 @@ async def test_cli_ingest_feeds_and_news(
         table = capsys.readouterr().out.splitlines()
         assert table[0].startswith("SOURCE")
         assert table[1] == (
-            "gdelt:TICA         1  2025-01-06 to 2025-01-13        0     0  never             0  "
+            "gdelt:TICA               1  2025-01-06 to 2025-01-13        0     0  "
+            "never             0  "
         )
         assert len(table) == 2
 

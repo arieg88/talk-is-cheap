@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 # Arbitrary, fixed keys ("tic" news), one per kind of writer.
 POLL_LOCK = 7_469_630_001
 BACKFILL_LOCK = 7_469_630_002
+ARCHIVES_LOCK = 7_469_630_003
+FINNHUB_LOCK = 7_469_630_004
 
 
 @asynccontextmanager

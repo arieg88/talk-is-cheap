@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from talk_is_cheap.db.models import Article, Guidance, Statement, StatementOutcome
+from talk_is_cheap.news.queries import ARTICLE_LINK, ARTICLE_PUBLISHER
 from talk_is_cheap.statements.roster import normalize_name
 
 CHECKABLE = ("numeric_forecast", "directional")
@@ -47,7 +48,7 @@ async def company_statements(
     statement date ("2025"); `speaker` matches the article's or the roster's name, or a
     surname."""
     statement = (
-        select(Statement, StatementOutcome, Article.publisher, Article.url, Article.published_at)
+        select(Statement, StatementOutcome, ARTICLE_PUBLISHER, ARTICLE_LINK, Article.published_at)
         .join(Article, Article.id == Statement.article_id)
         .outerjoin(StatementOutcome, StatementOutcome.statement_id == Statement.id)
         .order_by(Statement.ticker, Statement.statement_date.desc(), Statement.id)

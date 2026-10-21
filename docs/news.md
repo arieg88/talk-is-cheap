@@ -1,11 +1,16 @@
 # News
 
-How `talk-is-cheap ingest news` collects headlines, how articles are deduplicated and
-linked to companies, and what each source returned when it was checked.
+Where the news comes from: `talk-is-cheap ingest news` (RSS polling and the GDELT
+backfill), `ingest archives` (past articles of interview-heavy publishers from Common
+Crawl and the Wayback Machine) and `ingest finnhub` (Finnhub company news); how articles
+are deduplicated and linked to companies; and what each source returned when it was
+checked. Every source feeds the same store, deduplication and linking, and the same
+article text, statements and promises downstream.
 
 Polling and backfill store metadata only: headline, the feed's own summary, link,
 publisher and time. The body of one article per linked story is fetched separately, for
-statement extraction only (section 8).
+statement extraction only (section 8); archived articles arrive with their body
+(section 9).
 
 ## 1. How it works
 
@@ -64,6 +69,30 @@ Checked live on 2026-10-18 and 2026-10-19.
 | `marketwatch.com/rss/topstories` | Redirects (301) | | Replaced by the Dow Jones feed above |
 | MarketWatch MarketPulse, Real-time Headlines (`mw_marketpulse`, `mw_realtimeheadlines`) | Answer 200, but the newest items are from June-July 2025 | | Not used |
 | WSJ Markets `feeds.a.dj.com/rss/RSSMarketsMain.xml` | Answers 200, unchanged since January 2025 | | Not used |
+
+### Technology and business press, and press release wires
+
+Checked live on 2026-10-21; every feed below returned items on its first poll.
+
+| Feed | Items on the first poll |
+| --- | --- |
+| TechCrunch `techcrunch.com/feed/` | 20 |
+| The Verge `theverge.com/rss/index.xml` | 10 |
+| Ars Technica `feeds.arstechnica.com/arstechnica/index` | 20 |
+| The Register `theregister.com/headlines.atom` | 50 |
+| Tom's Hardware `tomshardware.com/feeds/all` | 50 |
+| Fortune `fortune.com/feed/` | 10 |
+| Business Wire technology `feed.businesswire.com/rss/home/?rss=G1QFDERJXkJeGVtRWA==` | 96 |
+| GlobeNewswire semiconductors `globenewswire.com/RssFeed/industry/9576-Semiconductors/...` | 20 |
+| PR Newswire technology `prnewswire.com/rss/technology-latest-news/technology-latest-news-list.rss` | 20 |
+
+No wire offers a per-company feed that can be found without an account: GlobeNewswire's
+organization feeds need an id that only its script-rendered pages show
+(`RssFeed/organization/NVIDIA` answers 400), its keyword feed (`RssFeed/keyword/NVIDIA`)
+returns partners' releases that mention a name, not the issuer's, and Business Wire and PR
+Newswire publish feeds by industry and subject only. So the wires' technology feeds are
+polled, and releases are linked by the names in their headlines and summaries. Business
+Wire's home feed (`?rss=G1QFDERJXkJeEFtRXg==`) answered with no items and is not used.
 
 ### Company newsrooms and investor relations
 
@@ -237,9 +266,11 @@ Matching rules (`linking.py`):
 - `new`: never fetched successfully;
 - `ok`: otherwise.
 
-Backfill sources (`gdelt:<ticker>`) are not polled feeds and are left out of this table
-and its totals. `talk-is-cheap feeds --backfill` shows them: weeks fetched, the first
-and last of them (with any gaps between), articles, weeks still over the record limit, last success and last error.
+Backfill sources (`gdelt:<ticker>`, `finnhub:<ticker>`, `commoncrawl:<ticker>`,
+`wayback:<ticker>`) are not polled feeds and are left out of this table and its totals.
+`talk-is-cheap feeds --backfill` shows them: windows fetched (GDELT and Finnhub), the
+first and last of them, articles, windows still over the record limit, last success and
+last error.
 
 ## 7. Backfill
 
@@ -275,24 +306,294 @@ A window that fails 30 times in a row is skipped and fetched by the next run (se
 
 ## 8. Article text
 
-`talk-is-cheap ingest article-text [--tickers NVDA] [--limit 100]` (`news/article_text.py`)
-fetches the text of one article per story (dedup cluster) linked to a company with
-confidence 0.5 or more, into `article_texts`, for the claims executives make in the news
-([statements.md](statements.md)). It is a separate command and module: polling, backfill,
-clustering and linking are unchanged.
+`talk-is-cheap ingest article-text [--tickers NVDA] [--limit 100] [--recovered-only |
+--finnhub [--dry-run] | --common-crawl] [--slow]` (`news/article_text.py`) fetches the
+text of one article per story (dedup cluster) linked to a company with confidence 0.5 or
+more, into `article_texts`, for the claims executives make in the news
+([statements.md](statements.md)). It is a separate command and module: polling,
+backfill, clustering and linking are unchanged.
 
 - **Which article:** a direct link before a Google News link (Google's robots.txt
   forbids following its redirects), then the longest summary, then the earliest; a story
-  whose article is unavailable for good moves on to its next article.
-- **Rules:** robots.txt of every host (and of every host a redirect leads to) is read
-  first and obeyed for the first word of `ARTICLE_USER_AGENT`; at most one request per
-  second per host, or its Crawl-delay; 15-second timeout; no retries within a run.
-- **Outcomes:** `ok` with the text, or `unavailable` with the reason. 401, 402, 403, 404,
-  410, 451, robots.txt refusals and pages without article text are final; timeouts,
-  connection and server errors, and unreadable robots.txt files are tried by the next
-  run. Each result is stored as it arrives, so a run can be stopped and resumed.
-- **Summary:** one line per publisher: fetched, unavailable (by reason) and skipped
-  (text stored, or nothing left to try).
+  whose article is unavailable for good moves on to its next article. An article's link
+  is its `publisher_url` when one is known: a Google News story matched on Finnhub, or a
+  Finnhub link already resolved (section 10). `--recovered-only` fetches only the
+  matched Google News stories; `--finnhub` only Finnhub stories that pass the pre-filter
+  of section 10, oldest first.
+- **robots.txt** of every host (and of every host a redirect leads to) is read first and
+  obeyed for the first word of `ARTICLE_USER_AGENT`. It is kept on disk under
+  `NEWS_CACHE_DIR/robots` for a day (`ROBOTS_TTL`), so a URL it refuses (news.google.com,
+  StockTwits, The Register, Yahoo Finance's disallowed paths) is skipped without any
+  request; such refusals are counted apart and left out of the success rate.
+- **Pacing:** at most one request per second per host (or its Crawl-delay; `--slow`: one
+  every 10 seconds), every host in its own queue and hosts in parallel, at most 8
+  requests at a time, 15-second timeout. A Finnhub link is resolved first (one request
+  to finnhub.io, not followed) and its publisher URL stored on the article, so the
+  article joins its publisher's queue.
+- **Outcomes:** `ok` with the text, or `unavailable` with the reason.
+  - Final: 401, 402, 403, 404, 410 and 451; robots.txt refusals; paywalls (subscription
+    prompts, and Seeking Alpha's 403, which is its paywall: `paywall: HTTP 403
+    (seekingalpha.com)`); pages without article text.
+  - Tried by the next run: timeouts, connection and server errors, unreadable robots.txt
+    files, and **interstitials**: a consent page a redirect leads to, or HTTP 202 with an
+    empty body (Barchart's bot check). A host that answers 3 interstitials in a row
+    (`PAUSE_AFTER`) is paused for the rest of the run while the others continue; its
+    remaining articles are left unstored, for a later `--slow` run.
+  - Each result is stored as it arrives, so a run can be stopped and resumed.
+- **Summary:** per publisher: fetched, unavailable (by reason), refused by robots.txt,
+  paused and skipped; the success rate of the articles requested; the paused hosts.
+- **Common Crawl fallback** (`--common-crawl`, `news/cc_fallback.py`): instead of
+  fetching live, looks up articles whose live page is gone (404, 410) or had no text in
+  the Common Crawl index, by publisher URL, in the crawls that ran after the article was
+  published, newest first, at most 3; the first successful HTML capture's text is stored
+  with `reason = "text from Common Crawl <crawl>"`, and an article found nowhere is marked
+  `no Common Crawl copy` and not looked up again. Refusals are never got around with a
+  copy: robots.txt refusals, 401, 403 and 405 answers, paywalls and interstitials are
+  never looked up. Common Crawl gets one request a second, with backoff and the disk
+  cache. The Wayback Machine is not used.
 
-Results on 2026-10-20 are in [statements.md](statements.md), section 1: text for 538 of
-2,371 stories; 1,560 stories have only a Google News link.
+**What failed, 2026-10-21.** Of 1,480 articles marked unavailable in two hours (Finnhub
+links resolved to their publisher to count them):
+
+| Domain | Total | robots.txt | HTTP 403 | No text | HTTP 404 | Paywall (402) | HTTP 405 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| news.google.com | 875 | 875 | | | | | |
+| finance.yahoo.com | 227 | 126 | | 67 | 34 | | |
+| benzinga.com | 112 | | 112 | | | | |
+| thestreet.com | 44 | | 44 | | | | |
+| stocktwits.com | 42 | 42 | | | | | |
+| barchart.com | 40 | | | 40 | | | |
+| seekingalpha.com | 34 | | 34 | | | | |
+| cnbc.com | 17 | | | 17 | | | |
+| investopedia.com | 12 | | | | | 12 | |
+| theregister.com | 10 | 10 | | | | | |
+| 23 other domains | 67 | 35 | 8 | 2 | 7 | 9 | 6 |
+
+No host answered 429, 5xx or timed out. Yahoo's pages without text are headline lists
+and one-line wire briefs (the article page itself loads; "consent" appears only in its
+scripts), not a consent wall; Barchart's are HTTP 202 with an empty body, an
+interstitial, and its stories are now paused and retried with `--slow`. 87 earlier
+Seeking Alpha 403s were re-marked as its paywall and 67 earlier HTTP 202 pages as
+interstitials.
+
+## 9. Archived articles: Common Crawl and the Wayback Machine
+
+`talk-is-cheap ingest archives [--publishers cnbc,fortune] [--tickers NVDA] [--since
+2024-01-01] [--dry-run] [--limit N]` (`news/archives.py`, `news/archive_index.py`) finds
+past articles of interview-heavy publishers in web archives, back to `history_start`,
+and reads each from the publisher's live page: RSS only reaches back days, and Google
+News links cannot be followed. The archives supply the URLs; the text comes from the
+publisher under the article-text rules, and from the archive copy only when the live
+page is gone.
+
+**Publishers** are configured in `archives.yaml`: domain, one or more URL formats (a path
+prefix, a regular expression an article's path must match, and one that reads the date
+from the path). Each format was checked against real index rows on 2026-10-21:
+
+| Publisher | URL format | Date in the URL |
+| --- | --- | --- |
+| CNBC | `/2024/05/22/nvidia-...-says.html` | day |
+| Fortune | `/2024/05/23/slug/` (the `/article/slug/` pages are evergreen guides, left out) | day |
+| Business Insider | `/nvidia-ceo-jensen-huang-says-ai-2024-5` | month |
+| The Verge | `/2025/1/1/24333454/slug` until early 2025, then `/news/1000532/slug` | day, then none |
+| TechCrunch | `/2024/05/03/slug/` | day |
+| Ars Technica | `/ai/2025/01/slug/` (gadgets, ai, information-technology, tech-policy, cars) | month |
+| Tom's Hardware | `/pc-components/gpus/slug` | none |
+| The Register | `/2024/05/23/words_joined_by_underscores/` | day |
+| MarketWatch | `/story/slug-04fb6eb1` (older slugs end in the date) | none (older: day) |
+| Yahoo Finance | `/news/slug-125746289.html` | none |
+
+Every publisher's URLs carry a slug, so none was dropped; the four without a date in
+the URL take it from the page's metadata.
+
+**Search.**
+
+- *Common Crawl* (`index.commoncrawl.org`, crawls from `collinfo.json` whose dates reach
+  `--since`), for publishers with `common_crawl: true`: one prefix query per crawl and
+  publisher format (the path up to its first placeholder other than `{year}`, for the
+  crawl's year and the year before), in pages of one index block, filtered on the server
+  by status 200 and HTML. The index ignores URL filters (any `url`, `original` or
+  `urlkey` filter answers "No Captures found"), so URLs are filtered locally; it cuts
+  answers off at about 960 KB, mid-line, and such a page is kept up to its last whole
+  line and reported. One probe per crawl skips a crawl that holds nothing of the domain.
+  **It is off for every configured publisher** (below).
+- *Wayback Machine* (`web.archive.org/cdx/search/cdx`): for each month that ended at
+  least 7 days ago (`SETTLE_TIME`; later days are still being archived, and RSS and
+  Finnhub cover them) and that Common Crawl holds no article URL of the publisher for (by
+  URL date, else capture month; filtered or not), a query of that month's prefix
+  (`www.cnbc.com/2024/05/`) when the format has one; else one query per company name at
+  the start of the slug (`finance.yahoo.com/news/nvidia`), or of the whole path, over the
+  span of missing months. The server filters by status, HTML and a regular expression (a
+  name and a claim word anywhere in the URL, any case), and collapses repeats. A query
+  of a whole year of CNBC did not answer within 4.5 minutes, so queries stay per month.
+- Progress is recorded in `archive_searches` (publisher, source, crawl or month, prefix,
+  pages, pages done, captures, kept, months found, complete) as each page's captures are
+  stored; an interrupted search resumes at its first page not done, and a complete one
+  is skipped. Publishers marked `deferred` (Ars Technica, five sections searched month by
+  month) are searched and downloaded after every other publisher's search and downloads.
+
+**Why Common Crawl's search is off.** Measured from its cached answers on 2026-10-21,
+after 25 to 52 searches per publisher (20 to 100 minutes each, mostly 504 retries):
+
+| Publisher | Captures | Not an article path | Dated before 2024 | Rejected by the slug filter | Kept |
+| --- | --- | --- | --- | --- | --- |
+| CNBC | 864, all in one crawl (CC-MAIN-2024-10) | 116 | 522 | 222 | 4 |
+| Fortune | 0: no 2024-2026 prefix has an index page in any crawl | | | | 0 |
+| Business Insider | 74,740 (34 lines lost to the cutoff) | 27,773 | 44,065 | 2,859 | 19 URLs |
+| The Verge | 1,245, all January-February 2024 | | | 1,230 | 13 |
+
+The filter was not at fault: the rejected 2024+ URLs are stories with no company name
+and claim word ("wayfair-layoffs-...", "hungarian-president-novak-resigns"), and no
+www, trailing-slash, AMP, mobile or query-string mismatch was found (paths are matched;
+hosts with or without www). CNBC's and Yahoo's robots.txt name CCBot, and Common Crawl
+obeys them, so after early 2024 the crawls hold almost none of these sites' articles.
+Wayback kept 1,137 CNBC and 675 Fortune URLs from the same months. Common Crawl stays
+in use for reading WARC records of captures it holds and for the article-text fallback
+(section 8).
+
+**The slug filter** (`SlugFilter`), free, before any download. A URL is kept when it is
+an article of a configured format, published on or after `--since` (by its URL date),
+and its slug (the last path segment, split on `-`, `_` and `.`):
+
+1. names a company of `universe.yaml` (ticker, name or alias) or one of its executives
+   (any roster name or alias), as consecutive words; the last may carry an "s", since
+   slugs drop the apostrophe ("nvidias", "apples");
+2. contains a claim word from `archives.yaml`: says, said, interview, ceo, cfo, expects,
+   plans, predicts, targets, will, forecast, promises, vows;
+3. contains none of that company's `exclude_phrases` ("big-apple");
+4. is not already stored as an article (canonical URL, query dropped).
+
+One capture per URL is kept in `archive_captures`: a successful HTML capture, from
+Common Crawl when it has one (a range request is cheaper than a page), else the
+earliest. Each round prints the URLs kept per publisher, per company and per year
+before downloading anything; `--dry-run` searches, prints them, and downloads nothing.
+
+**Download.** Each article is fetched from its **live publisher URL** through the
+article-text rules (section 8): its User-Agent, robots.txt (kept on disk), one request a
+second per domain, every publisher's domain in parallel. The archive copy is read only
+when the live page is gone (404, 410) or has no text (`LIVE_GONE`) **and** robots.txt
+allows the URL; a robots.txt refusal, a 401, 403 or 451, or a paywall is never got
+around with a copy. A Common Crawl copy is one HTTP range request for its WARC record at
+`data.commoncrawl.org` (no S3 access); a Wayback copy is the raw page
+(`web.archive.org/web/<timestamp>id_/<url>`), at one request every three seconds. Where
+the text came from is recorded: a live page's text has no note (as every article-text
+fetch), an archive copy's `reason` is "text from the Wayback Machine capture of <date>"
+(or Common Crawl), and `archive_captures.reason` records what the live page answered.
+Timeouts, server errors and interstitials leave a capture `pending` for the next run.
+The text is extracted with trafilatura, as in section 8, into `article_texts`. The
+article is stored with its original publisher URL (never the archive's), the publication
+time from the page's metadata
+(`article:published_time`, JSON-LD `datePublished` and similar; a time later than the
+capture is a modification time and is not used), else the URL's date
+(`time_precision = 'date'`), else the capture time (`seen`); its title and description
+from Open Graph tags; and its source as the feed `commoncrawl:<ticker>` or
+`wayback:<ticker>` for each company the slug names. Storing goes through
+`store.store_items`: the same normalization, deduplication (canonical URL, then
+near-duplicate headlines) and linking as feed items. The feed link is weak (0.3), like a
+per-company feed: the headline and description decide the link. Downloads run oldest
+first within each domain.
+
+**Polite client.** Every request carries `talk-is-cheap/<version> (research: reads
+archived news for executives' statements; contact: <EDGAR_IDENTITY>)`, and every
+answer is kept on disk under `NEWS_CACHE_DIR` (`news/http_cache.py`), so nothing is
+fetched twice. Common Crawl gets at most one request a second, the Wayback Machine one
+every three seconds; 429 and 5xx answers, dropped connections and answers that are not
+whole (a maintenance page sent with status 200, a page cut off mid-line) are retried
+after 5 seconds, doubling to 2 minutes, at most 8 times; then the search is left for the
+next run.
+
+**Text use.** As for every article: extraction and grounding only; answers quote at most
+40 words and link to the publisher's URL.
+
+## 10. Finnhub company news
+
+`talk-is-cheap ingest finnhub [--tickers NVDA] [--since 2025-11-01] [--dry-run]`
+(`news/finnhub.py`) uses Finnhub's company-news API with a free key
+(`FINNHUB_API_KEY`; without it the command prints one line and does nothing). **Finnhub's
+free tier is licensed for personal use only**; this project uses it for research on its
+owner's machine, and its items are not republished.
+
+- **Requests:** one per ticker and window of 7 days (`finnhub.io/api/v1/company-news`),
+  the key in the `X-Finnhub-Token` header, at most one every 1.1 seconds (the free tier
+  allows 60 a minute), 429 retried with backoff. An answer holds at most 250 items,
+  newest first; a full answer is split in half, down to one day, and a day still full is
+  recorded as truncated. Windows are recorded in `backfill_windows` and answers cached,
+  except windows ending within the last two days.
+- **History depth**, measured at the start of every run by halving: the earliest day a
+  three-day window still returns items. On 2026-10-21 it was 362 days (back to
+  2025-10-24), which covers every Google-News-only story (all from 2026).
+- **Links:** every item's `url` is a Finnhub redirect (`finnhub.io/api/news?id=...`) to
+  the publisher; Finnhub's robots.txt allows it.
+
+**Recovering Google News stories.** A story whose only links are Google News redirects
+is matched to the Finnhub items listed for the same company, published within two days:
+the best headline similarity (`dedup.similarity`, the better of rapidfuzz `ratio` and
+`token_sort_ratio`, of normalized headlines) wins, and a match at or above
+`MATCH_THRESHOLD` has its Finnhub link resolved (one request, the redirect not
+followed). The publisher URL is stored on the Google News article (`publisher_url`),
+with the score (`publisher_url_score`) and its source, and the article's earlier
+"robots.txt disallows" result is cleared, so `ingest article-text` fetches the
+publisher's page under its usual rules.
+
+The threshold was checked by hand on 20 pairs, four per score band: all 16 at 80 or more
+were the same story (often another outlet's version: a Bloomberg headline matched to
+Benzinga's write-up, which is why text read from a publisher URL is cited with that
+URL's site, `queries.ARTICLE_PUBLISHER`); 2 of the 4 between 70 and 80 were not ("What
+to expect in the week ahead" against another week-ahead piece). `MATCH_THRESHOLD` is 85.
+Result on 2026-10-21: of 2,494 stories whose only links were Google News redirects, 364
+(14.6%) were matched to a publisher URL and 256 of those (70%) yielded text; 6 more gained
+a direct link because a new Finnhub item joined their cluster. The rest are mostly
+Reuters, Bloomberg, WSJ and similar outlets Finnhub's free lists do not carry.
+
+**New stories.** Items that match no stored story and whose headline names a company of
+the universe (a text link of 0.8 or more: a name, alias or ticker) are stored as the feed
+`finnhub:<ticker>` (link 0.3) through the usual pipeline, under their Finnhub link, which
+`ingest article-text` follows to the publisher. Per-ticker lists carry many stories
+about other companies (Micron, SMCI and Berkshire Hathaway under NVDA), which are not
+stored. The first run also stored items that named a company only in their summary; a
+hand check of 20 random Finnhub-linked stories found 16 about the company they were
+linked to, and two of the four misses were such summary-only links (a Fed preview naming
+Nvidia, a podcast roundup naming Google). Those items, 7,966 single-article stories
+that only Finnhub supplied, were removed and the rule tightened; a fresh sample of 20
+then had 17 right. The three misses name the company in the headline but are about
+another (a "top money news" roundup with Netflix layoffs, SpaceX overtaking Amazon and
+Microsoft in market value, Micron's outlook citing Nvidia news).
+
+**Which stories are read.** `talk-is-cheap ingest article-text --finnhub [--dry-run]
+[--limit N]` (`finnhub.py: text_candidates`) fetches the text only of Finnhub stories
+whose headline or summary names the linked company or one of its executives together
+with an attribution or claim word, and none of its excluded phrases: the archives' slug
+filter (section 9, the claim words of `archives.yaml`) applied to the feed text. Oldest
+first, since older claims are more likely due. `--dry-run` prints how many stories pass
+per company and fetches nothing. Of 20 random stories that pass, 18 are about the company
+they are linked to (the misses: a BMW model compared with Tesla, an Asian markets
+roundup naming Nvidia).
+
+## 11. What each source contributes
+
+`talk-is-cheap sources` (`sources.py`) counts articles and stories (dedup clusters) per
+source: RSS (polled feeds: Yahoo Finance, Google News, market-wide feeds, newsrooms),
+GDELT, Common Crawl, the Wayback Machine and Finnhub, by the feeds that supplied each
+article; a Google News story matched on Finnhub counts for both RSS and Finnhub.
+`talk-is-cheap sources --report` counts only what no other source also found, over the
+stories whose articles all come from one source: articles linked to a company
+(confidence 0.5 or more), stories with text, management claims, and due claims (one per
+group of identical promises, due by the resolver's rule). It reads the database only;
+re-run it after any ingest.
+
+## 12. Resuming the jobs
+
+Every job below is resumable: what it stored is kept, and running the same command again
+continues where it stopped. Run them one at a time per service (the archive run's live
+downloads share publisher domains with `ingest article-text`, so the two should not run
+together; Common Crawl should have one client at a time).
+
+| Job | Command | State when last stopped (2026-10-21) |
+| --- | --- | --- |
+| Archive search and downloads | `uv run talk-is-cheap ingest archives` (`--dry-run` to search and print the counts only) | Wayback search done for CNBC (31 months) and Fortune (33); Business Insider 31 of 32 name searches, The Verge 3 of 32; TechCrunch, Tom's Hardware, The Register, MarketWatch and Yahoo Finance not started; Ars Technica (deferred) last. 2,284 URLs found, all pending download |
+| Finnhub story text | `uv run talk-is-cheap ingest article-text --finnhub` (`--dry-run` for the pre-filter counts) | 1,010 pre-filtered stories left to fetch, oldest first |
+| Hosts paused after interstitials (Barchart) | `uv run talk-is-cheap ingest article-text --finnhub --slow` | Barchart's stories left unstored by the pause |
+| Common Crawl text fallback | `uv run talk-is-cheap ingest article-text --common-crawl` | 1,352 articles to look up; the first run made 12 lookups (10 failed on Common Crawl's 504s and stay queued) |
+| Finnhub news and matching | `uv run talk-is-cheap ingest finnhub` | Done through 2026-10-21; a re-run fetches only windows not recorded |
+| What each source found | `uv run talk-is-cheap sources --report` | Read-only, any time |
+
